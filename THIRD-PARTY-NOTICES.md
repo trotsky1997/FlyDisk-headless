@@ -60,6 +60,10 @@
 
 ## 三、.NET 运行时
 
+**Headless fork** 的 Windows x64 发布包为自包含发布，携带 Microsoft.NETCore.App 10.0.15；打包步骤从对应的 NuGet runtime 包复制 `LICENSE.TXT` 与 `THIRD-PARTY-NOTICES.TXT` 至 `Licenses/dotnet-runtime-LICENSE.TXT` 和 `Licenses/dotnet-runtime-THIRD-PARTY-NOTICES.TXT`。保持独立 DLL 分发，使用者可以替换 LGPL 库。本分支无界面包不携带上游字体/图标资源。
+
+以下描述保留上游 GUI 的框架依赖发布方式：
+
 当前发布配置为框架依赖发布（`SelfContained=false`），运行时由用户机器提供，**不随本程序分发**，因此无需随附运行时的许可证。
 
 若日后改为自包含发布（`SelfContained=true`）或自带运行时的单文件发布，需追加随附 `dotnet/runtime` 的 `LICENSE.TXT`（MIT）与 `THIRD-PARTY-NOTICES.TXT`。

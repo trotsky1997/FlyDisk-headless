@@ -145,8 +145,9 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
     {
         AssertNoListener();
         // 原生枚举不能证明断线但残留的 iSCSI 设备已移除；由存储提供程序再核对。
-        string script = "$ErrorActionPreference='Stop'; " +
-            "$s=@(Get-IscsiSession | Where-Object TargetNodeAddress -eq '" + HostConfig.Iqn + "'); " +
+        string script = "$ErrorActionPreference='Stop'; $service=Get-Service MSiSCSI; $s=@(); " +
+            "if($service.Status -eq 'Running'){$s=@(Get-IscsiSession | Where-Object TargetNodeAddress -eq '" + HostConfig.Iqn + "')} " +
+            "elseif($service.Status -ne 'Stopped'){throw 'MSiSCSI is transitioning'}; " +
             "[pscustomobject]@{Sessions=$s.Count;Disks=@(Get-Disk | Select-Object Number,SerialNumber,Size,BusType)} | ConvertTo-Json -Depth 4 -Compress";
         string output = External.Run("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
             Convert.ToBase64String(Encoding.Unicode.GetBytes(script))]);

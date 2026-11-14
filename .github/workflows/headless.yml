@@ -20,7 +20,7 @@ jobs:
       - name: Build original GUI after engine extraction
         run: dotnet build FlyDisk/FlyDisk.csproj -c Release
       - name: Publish standalone headless package
-        run: dotnet publish Headless/FlyDisk.Headless.csproj -c Release -r win-x64 --self-contained true -o artifacts/headless
+        run: dotnet publish Headless/FlyDisk.Headless.csproj -c Release -r win-x64 --self-contained true -p:RuntimeFrameworkVersion=10.0.15 -o artifacts/headless
       - name: Actual Windows SCM integration without disk takeover
         shell: pwsh
         run: ./Tests/Test-WindowsService.ps1 -Package ./artifacts/headless -Fixture ./Tests/bin/Release/net10.0-windows/FlyDisk.Headless.Tests.exe
@@ -29,6 +29,9 @@ jobs:
         run: |
           Copy-Item LICENSE,THIRD-PARTY-NOTICES.md,Headless/README.md,Headless/config.example.json artifacts/headless
           Copy-Item FlyDisk/Licenses artifacts/headless -Recurse
+          $runtime = Join-Path $env:USERPROFILE '.nuget/packages/microsoft.netcore.app.runtime.win-x64/10.0.15'
+          Copy-Item (Join-Path $runtime 'LICENSE.TXT') artifacts/headless/Licenses/dotnet-runtime-LICENSE.TXT
+          Copy-Item (Join-Path $runtime 'THIRD-PARTY-NOTICES.TXT') artifacts/headless/Licenses/dotnet-runtime-THIRD-PARTY-NOTICES.TXT
       - uses: actions/upload-artifact@v4
         with:
           name: FlyDisk-headless-win-x64

@@ -1,0 +1,11 @@
+{
+  "SchemaVersion": 1,
+  "DiskIdentity": "REPLACE-MODEL|REPLACE-SERIAL",
+  "ExpectedSizeBytes": 1073741824,
+  "CacheVolume": "C:",
+  "CacheSizeBytes": 34359738368,
+  "EnableMemoryCache": false,
+  "RiskAccepted": false,
+  "Language": "zh-CN",
+  "ListenPort": 3260
+}

@@ -1,4 +1,5 @@
 {
+  "l2v.err.confirmUnverified": "尚未完成无错误的校验或修复，不能确认缓存账本。",
   "menu.settings": "设置",
   "menu.inspector": "检查器",
   "menu.verifyL2": "校验 L2",

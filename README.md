@@ -1,5 +1,9 @@
 # FlyDisk
 
+> **Headless 服务版分支**：本 fork 新增无需桌面的命令行与原生 Windows 服务入口。
+> 安装、停服还盘、缓存校验与恢复说明见 **[Headless/README.md](Headless/README.md)**。
+> 当前为预览版；以下内容保留上游 GUI 的介绍，其“停服保持脱机”语义不适用于 headless 的正常停服路径。
+
 **简体中文** | [English](docs/README_en.md)
 
 Windows 机械硬盘块级缓存加速器 · 让你的机械硬盘飞起来！

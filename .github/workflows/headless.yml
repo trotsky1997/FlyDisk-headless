@@ -1,0 +1,35 @@
+name: Headless Windows validation
+on:
+  push:
+    branches: [headless-server]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Cache and failure regression tests (synthetic block devices)
+        run: dotnet run --project Tests/FlyDisk.Headless.Tests.csproj -c Release
+      - name: Build original GUI after engine extraction
+        run: dotnet build FlyDisk/FlyDisk.csproj -c Release
+      - name: Publish standalone headless package
+        run: dotnet publish Headless/FlyDisk.Headless.csproj -c Release -r win-x64 --self-contained true -o artifacts/headless
+      - name: Actual Windows SCM integration without disk takeover
+        shell: pwsh
+        run: ./Tests/Test-WindowsService.ps1 -Package ./artifacts/headless -Fixture ./Tests/bin/Release/net10.0-windows/FlyDisk.Headless.Tests.exe
+      - name: Include documentation and licenses
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE,THIRD-PARTY-NOTICES.md,Headless/README.md,Headless/config.example.json artifacts/headless
+          Copy-Item FlyDisk/Licenses artifacts/headless -Recurse
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FlyDisk-headless-win-x64
+          path: artifacts/headless

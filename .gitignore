@@ -8,6 +8,7 @@
 [Pp]ublish/
 TestResults/
 packages/
+artifacts/
 Handle2/
 
 Thumbs.db

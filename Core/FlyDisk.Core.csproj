@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../FlyDisk/Engine/**/*.cs" Link="Engine/%(RecursiveDir)%(Filename)%(Extension)" />
+    <Compile Include="../FlyDisk/Models/*.cs" Link="Models/%(Filename)%(Extension)" />
+    <Compile Include="../FlyDisk/Localization/Locale.cs" Link="Localization/Locale.cs" />
+    <Compile Include="../FlyDisk/DiskText.cs" Link="DiskText.cs" />
+    <EmbeddedResource Include="../FlyDisk/Localization/zh-CN.json" LogicalName="FlyDisk.zh-CN.json" />
+    <EmbeddedResource Include="../FlyDisk/Localization/en-US.json" LogicalName="FlyDisk.en-US.json" />
+    <PackageReference Include="ISCSI" Version="1.5.6" />
+    <PackageReference Include="DiskAccessLibrary.Win32" Version="1.6.3" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.12" />
+  </ItemGroup>
+</Project>

@@ -29,6 +29,13 @@ public sealed class StateStore(string directory, HostConfig config)
             throw new IOException("Pending recovery belongs to another configuration. Restore its original config and recover before changing disks or cache settings.");
     }
 
+    public void AssertReadyForStart()
+    {
+        AssertRecoveryConfigMatches();
+        if (File.Exists(PathName) && JsonSerializer.Deserialize<HostState>(File.ReadAllText(PathName), Json) is { RecoveryRequired: true })
+            throw new IOException("An unfinished takeover is recorded. Run recover before starting; the recovery checkpoint has been preserved.");
+    }
+
     public void Write(string phase, string? error, bool recoveryRequired, object? stats = null)
     {
         lock (gate)

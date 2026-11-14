@@ -26,7 +26,7 @@ internal sealed class HostProcess(HostConfig config) : IHeadlessHost, IDisposabl
         {
             var backend = new NativeBackend(config);
             var store = new StateStore(ServiceManager.DataDirectory, config);
-            store.AssertRecoveryConfigMatches();
+            store.AssertReadyForStart();
             lifecycle = new Lifecycle(backend, (phase, error, recovery) => store.Write(phase, error, recovery));
             timer = new Timer(_ =>
             {

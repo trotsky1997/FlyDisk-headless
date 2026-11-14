@@ -90,6 +90,14 @@ try
         store.Write("stopped",null,false); Check(!File.Exists(store.PathName+".tmp"),"Incomplete atomic status");
     });
 
+    Test("restart cannot overwrite an unfinished recovery checkpoint", () => {
+        var store=new StateStore(root,Valid()); store.Write("recovery-required","injected",true);
+        string before=File.ReadAllText(store.PathName);
+        Throws(store.AssertReadyForStart);
+        Check(File.ReadAllText(store.PathName)==before,"Pending recovery overwritten");
+        store.Write("stopped",null,false); store.AssertReadyForStart();
+    });
+
     foreach(int sector in new[]{512,4096})
     {
         string cacheDir=Path.Combine(root,"cache-"+sector);

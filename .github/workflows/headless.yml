@@ -25,6 +25,7 @@ jobs:
         shell: pwsh
         run: ./Tests/Test-WindowsService.ps1 -Package ./artifacts/headless -Fixture ./Tests/bin/Release/net10.0-windows/FlyDisk.Headless.Tests.exe
       - name: Include documentation and licenses
+        if: success()
         shell: pwsh
         run: |
           Copy-Item LICENSE,THIRD-PARTY-NOTICES.md,Headless/README.md,Headless/config.example.json artifacts/headless
@@ -36,3 +37,11 @@ jobs:
         with:
           name: FlyDisk-headless-win-x64
           path: artifacts/headless
+      - name: Real virtual-disk iSCSI, NTFS, SMB and recovery acceptance
+        shell: pwsh
+        run: ./Tests/Test-VirtualDisk.ps1 -Package ./artifacts/headless
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: FlyDisk-vhd-diagnostics
+          path: artifacts/vhd-diagnostics

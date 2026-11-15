@@ -117,7 +117,7 @@ internal static class ServiceManager
         if (File.Exists(stateFile) && JsonSerializer.Deserialize<HostState>(File.ReadAllText(stateFile), StateStore.Json) is { RecoveryRequired: true })
             throw new IOException("Run recover successfully before uninstalling. The disk may still be offline.");
         External.Run("sc.exe", ["delete", Name]);
-        External.Run("powershell.exe",["-NoProfile","-NonInteractive","-Command","Get-ScheduledTask -TaskName 'FlyDiskHeadless-Recovery' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false"]);
+        External.Run("powershell.exe",["-NoProfile","-NonInteractive","-Command","$t=Get-ScheduledTask -TaskName 'FlyDiskHeadless-Recovery' -ErrorAction SilentlyContinue; if($t){$t | Unregister-ScheduledTask -Confirm:$false -ErrorAction Stop}; exit 0"]);
         // 保留配置与缓存，卸载绝不递归删除磁盘内容。
     }
 }

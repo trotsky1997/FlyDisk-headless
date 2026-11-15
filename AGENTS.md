@@ -2,6 +2,8 @@
 
 ## Headless fork 范围补充
 
+- WAL uses explicit `Flush(true)` barriers instead of per-write `WriteThrough`: payload/header precede the first barrier; each redundant checkpoint retains its own barrier. Do not acknowledge earlier or merge the two reclaim checkpoint barriers. Fully WAL-covered reads overlay journal records without acquiring the HDD source gate; reads with gaps still use the serialized source handle.
+
 - 用户已批准 SSD 持久化 WAL 回写及生产部署。`EnableWriteBack=true` 时启动/恢复先离线重放并 Flush HDD，再重建读缓存和 export；停服必须排空 WAL，失败禁止归还源盘。
 - `WriteBackJournal` 双检查点在复用日志空间前必须都落盘；已提交记录校验失败必须拒绝恢复。后台和前台通过 sourceGate 串行使用原始句柄。
 - 4GiB/64GiB 是回写模式总预算，含读写缓存与元数据预留；最多65536条待写记录，空间或记录上限满时背压30秒后报错，不覆盖未回写记录。

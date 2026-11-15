@@ -11,6 +11,10 @@ if (args.Length == 2 && args[0] == "--wal-crash-fixture")
 {
     WriteBackTests.CrashFixture(args[1]); return;
 }
+if (args.Length == 2 && args[0] == "--wal-benchmark")
+{
+    WriteBackTests.Benchmark(args[1]); return;
+}
 
 if (args.SequenceEqual(["--service-fixture"]))
 {

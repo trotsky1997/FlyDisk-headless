@@ -55,7 +55,10 @@ public sealed class WriteBackJournal : IDurableBlockSource
         bool existing = File.Exists(path);
         if (!existing && File.Exists(marker)) throw new IOException("Required write-back journal is missing; source must stay offline.");
         file = new FileStream(path, existing ? FileMode.Open : FileMode.CreateNew, FileAccess.ReadWrite,
-            FileShare.None, 1, FileOptions.WriteThrough | FileOptions.RandomAccess);
+            // Use explicit durability barriers below. WriteThrough would force
+            // payload, header and each checkpoint write separately, then flush
+            // the same data again. No successful WRITE bypasses Flush(true).
+            FileShare.None, 1, FileOptions.RandomAccess);
         try
         {
             if (existing) Load();
@@ -209,8 +212,25 @@ public sealed class WriteBackJournal : IDurableBlockSource
         lock (gate)
         {
             Check();
+            // A fully journal-covered read must not wait behind an unrelated
+            // HDD destage/flush. Hold gate throughout coverage + overlay so no
+            // contributing record can be reclaimed between the two passes.
+            long covered = offset, end = offset + count;
+            var ranges = new List<(long From, long To)>();
+            foreach (var e in entries)
+            {
+                long from = Math.Max(offset, e.Offset), to = Math.Min(end, e.Offset + e.Count);
+                if (from < to) ranges.Add((from, to));
+            }
+            ranges.Sort((a,b) => a.From.CompareTo(b.From));
+            foreach (var range in ranges)
+            {
+                if (range.From > covered) break;
+                covered = Math.Max(covered, range.To);
+                if (covered == end) break;
+            }
             // 持 gate 防止回收记录；sourceGate 防止原始句柄共享文件指针竞争。
-            lock (sourceGate) source.Read(offset, b, start, count);
+            if (covered != end) { lock (sourceGate) source.Read(offset, b, start, count); }
             foreach (var e in entries)
             {
                 long from = Math.Max(offset, e.Offset), to = Math.Min(offset + count, e.Offset + e.Count);

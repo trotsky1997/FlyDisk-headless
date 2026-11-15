@@ -5,6 +5,20 @@ using FlyDisk.Headless;
 
 static class WriteBackTests
 {
+    public static void Benchmark(string parent)
+    {
+        string dir=Path.Combine(parent,"flydisk-wal-benchmark-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try {
+            var source=new Source();
+            using var journal=new WriteBackJournal(source,dir,42,16<<20,false);
+            byte[] data=new byte[128<<10];new Random(4592).NextBytes(data);
+            var clock=System.Diagnostics.Stopwatch.StartNew();
+            for(int i=0;i<64;i++)journal.Write((i%8)*data.Length,data,0,data.Length);
+            journal.Flush();clock.Stop();
+            Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new{Bytes=64L*data.Length,Seconds=clock.Elapsed.TotalSeconds,State=journal.Snapshot()}));
+        } finally {Directory.Delete(dir,true);}
+    }
     public static void CrashFixture(string dir)
     {
         using var s = new FileSource(Path.Combine(dir,"disk.bin"));
@@ -60,6 +74,14 @@ static class WriteBackTests
                 j.Write(0,Data(4),0,4096);j.Write(512,Data(9,512),0,512);j.DrainOne();
                 byte[] b=new byte[4096];j.Read(0,b,0,b.Length);check(b[0]==4 && b[512]==9 && b[1024]==4,"Old completion erased newer write");
                 j.Drain();check(s.Stable.SequenceEqual(s.Live),"Source not flushed");
+            });
+            test("WAL fully covered reads never touch HDD; gaps and overlaps remain correct", () => {
+                var s=new Source();using var j=new WriteBackJournal(s,Dir(),42,131072,false);
+                j.Write(4096,Data(2),0,4096);j.Write(0,Data(1),0,4096);j.Write(512,Data(9,512),0,512);
+                s.FailRead=true;byte[] b=new byte[8192];j.Read(0,b,0,b.Length);
+                check(b.Take(512).All(x=>x==1) && b.Skip(512).Take(512).All(x=>x==9) && b.Skip(1024).Take(3072).All(x=>x==1) && b.Skip(4096).All(x=>x==2),"Covered overlay mismatch");
+                throws(()=>j.Read(0,new byte[12288],0,12288));
+                s.FailRead=false;j.Read(0,new byte[12288],0,12288);
             });
             test("WAL full ring applies bounded backpressure without overwrite", () => {
                 var s=new Source();string dir=Dir();var j=new WriteBackJournal(s,dir,42,24576,false,20);
@@ -140,10 +162,10 @@ static class WriteBackTests
     }
     sealed class Source : IDurableBlockSource
     {
-        public byte[] Live=new byte[1<<20],Stable=new byte[1<<20];public bool FailFlush;
+        public byte[] Live=new byte[1<<20],Stable=new byte[1<<20];public bool FailFlush,FailRead;
         public int BytesPerSector=>512;public long SizeBytes=>Live.Length;
         public void Write(long o,byte[] b,int p,int n)=>Buffer.BlockCopy(b,p,Live,(int)o,n);
-        public void Read(long o,byte[] b,int p,int n)=>Buffer.BlockCopy(Live,(int)o,b,p,n);
+        public void Read(long o,byte[] b,int p,int n){if(FailRead)throw new IOException("injected read failure");Buffer.BlockCopy(Live,(int)o,b,p,n);}
         public void Flush(){if(FailFlush)throw new IOException("injected flush failure");Live.CopyTo(Stable,0);}
         public void PowerLoss()=>Stable.CopyTo(Live,0);
         public void Dispose(){}

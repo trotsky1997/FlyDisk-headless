@@ -2,6 +2,8 @@
 
 ## Headless fork
 
+WAL synchronization optimization: use explicit durable barriers without per-write WriteThrough; retain data-before-checkpoints and both reclaim barriers. Fully pending-log-covered reads no longer wait for the HDD source gate. Added a reproducible synthetic-source/real-SSD WAL benchmark and covered/gap/overlap read regression. Production performance and recovery acceptance are recorded with the deployment evidence.
+
 持久化写回：已增加 SSD 环形 WAL、双持久检查点、提交记录校验、后台有序批量回写、写满背压、SCSI FUA/Flush、匹配配置的启动重放与停止排空。测试包括故障阶段注入和真实测试进程崩溃；真实硬件掉电尚未测试。后续优化：在不扩大总预算前提下提高极小写入的记录密度，保留恢复后的可验证 L2 读热点，研究安全的覆盖合并（当前只合并相邻写，不跨顺序重排）。
 
 已实现：独立无 WinForms 核心、CLI、原生 Windows 服务注册、延迟自动启动选项、严格身份/容量/缓存配置预检、每次启动校验、正常停服还盘、受保护恢复、原子状态与配置指纹、PID复用防护、L2确认完整性守卫、模拟块源回归与可销毁 SCM 测试。

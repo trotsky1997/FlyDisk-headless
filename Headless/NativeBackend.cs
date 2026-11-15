@@ -95,12 +95,13 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
         selected = Resolve();
         IscsiInitiator.CleanupStale(config.TargetIqn, config.ListenAddress, config.ListenPort);
         AssertNoExport();
+        bool sourceWasOnline = selected.IsOnline;
         if (selected.IsOnline)
         {
             using var volumes = VolumeQuiesce.Lock(selected.DiskNumber);
             if (!PhysicalDiskHandle.TryOffline(selected.DiskNumber, out string offlineError)) throw new IOException(offlineError);
         }
-        ReplayWriteBack();
+        ReplayWriteBack(sourceWasOnline);
         if (settings.EnableWriteBack) ResetCleanReadCache();
         if (SsdCacheService.LedgerExists(config))
         {
@@ -202,10 +203,11 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
         _ => throw new IOException("Storage provider returned an unknown bus type.")
     };
 
-    private void ReplayWriteBack()
+    private void ReplayWriteBack(bool wasOnlineBeforePrepare = false)
     {
         if (config == null || !settings.EnableWriteBack) return;
         selected = Resolve();
+        bool wasOnline = wasOnlineBeforePrepare || selected.IsOnline;
         if (selected.IsOnline)
         {
             // 不能在已挂载的旧文件系统上重放缓存元数据。
@@ -213,9 +215,10 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
             if (!PhysicalDiskHandle.TryOffline(selected.DiskNumber, out string error)) throw new IOException(error);
         }
         using var raw = PhysicalDiskHandle.Open(selected.DiskNumber);
-        using var journal = new WriteBackJournal(raw, config.SsdCachePath,
+        var journal = new WriteBackJournal(raw, config.SsdCachePath,
             SsdCacheService.ComputeIdentity(raw.ToBlockSourceInfo()), settings.JournalBudgetBytes, false);
-        journal.Drain();
+        try { journal.AssertRecoverySourceWasOffline(wasOnline); journal.Drain(); }
+        finally { journal.CloseWithoutDrain(); } // 非后台恢复：失败必须保留日志且释放独占检查句柄。
     }
 
     private void ResetCleanReadCache()

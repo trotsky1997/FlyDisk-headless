@@ -26,6 +26,7 @@ public sealed class WriteBackJournal : IDurableBlockSource
     readonly IDurableBlockSource source;
     readonly FileStream file;
     readonly long identity, capacity;
+    readonly string directory;
     readonly LinkedList<Entry> entries = new();
     readonly int waitMilliseconds;
     Thread? worker;
@@ -44,10 +45,12 @@ public sealed class WriteBackJournal : IDurableBlockSource
     public WriteBackJournal(IDurableBlockSource source, string directory, long identity, long budgetBytes,
         bool startWorker = true, int waitMilliseconds = 30000)
     {
-        this.source = source; this.identity = identity; this.waitMilliseconds = waitMilliseconds;
+        this.source = source; this.identity = identity; this.waitMilliseconds = waitMilliseconds; this.directory = directory;
         capacity = (budgetBytes - Start) / Page * Page;
         if (capacity < 4 * Page || budgetBytes % Page != 0) throw new ArgumentException("Invalid WAL budget.");
         Directory.CreateDirectory(directory);
+        if (File.Exists(Path.Combine(directory, "writeback.online-conflict")))
+            throw new IOException("Source was online with pending WAL; offline data reconciliation is required.");
         string path = PathFor(directory), marker = MarkerFor(directory);
         bool existing = File.Exists(path);
         if (!existing && File.Exists(marker)) throw new IOException("Required write-back journal is missing; source must stay offline.");
@@ -224,6 +227,19 @@ public sealed class WriteBackJournal : IDurableBlockSource
         {
             Check(); if (worker != null) return;
             worker = new Thread(Worker) { IsBackground = true, Name = "FlyDisk WAL destager" }; worker.Start();
+        }
+    }
+    public void AssertRecoverySourceWasOffline(bool wasOnline)
+    {
+        lock (gate)
+        {
+            if (!wasOnline || entries.Count == 0) return;
+            using var marker = new FileStream(Path.Combine(directory,"writeback.online-conflict"),FileMode.Create,
+                FileAccess.Write,FileShare.None,1,FileOptions.WriteThrough);
+            marker.Write(System.Text.Encoding.UTF8.GetBytes("Pending WAL was found after the source had been online. Do not replay automatically.\n"));
+            marker.Flush(true);
+            failure = new IOException("Pending WAL source was online; refusing to overwrite possible external changes.");
+            throw (IOException)failure;
         }
     }
     void Worker()

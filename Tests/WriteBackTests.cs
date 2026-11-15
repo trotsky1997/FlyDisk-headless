@@ -108,6 +108,18 @@ static class WriteBackTests
                 throws(()=>new WriteBackJournal(s,dir,43,65536,false));throws(()=>new WriteBackJournal(s,dir,42,131072,false));
                 File.Delete(WriteBackJournal.PathFor(dir));throws(()=>new WriteBackJournal(s,dir,42,65536,false));
             });
+            test("WAL dirty source seen online persists conflict and blocks future replay", () => {
+                var s=new Source();string dir=Dir();var j=new WriteBackJournal(s,dir,42,65536,false);
+                j.Write(0,Data(63),0,4096);throws(()=>j.AssertRecoverySourceWasOffline(true));j.CloseWithoutDrain();
+                throws(()=>new WriteBackJournal(s,dir,42,65536,false));check(s.Stable[0]==0,"Conflicting source was overwritten");
+            });
+            foreach(string point in new[]{"checkpoint-first","checkpoint-second"})
+            test("WAL crash during reclaim "+point+" preserves remaining writes", () => {
+                var s=new Source();string dir=Dir();var j=new WriteBackJournal(s,dir,42,65536,false);
+                j.Write(0,Data(11),0,4096);j.Write(4096,Data(22),0,4096);
+                j.FaultPoint=p=>{if(p==point)throw new IOException("reclaim crash");};throws(()=>j.DrainOne());j.CloseWithoutDrain();s.PowerLoss();
+                using var r=new WriteBackJournal(s,dir,42,65536,false);r.Drain();check(s.Stable[0]==11 && s.Stable[4096]==22,"Reclaim crash lost data");
+            });
             test("WAL torn redundant checkpoint recovers valid copy", () => {
                 var s=new Source();string dir=Dir();var j=new WriteBackJournal(s,dir,42,65536,false);j.Write(0,Data(17),0,4096);j.CloseWithoutDrain();
                 using(var f=new FileStream(WriteBackJournal.PathFor(dir),FileMode.Open,FileAccess.Write)){f.Write(new byte[4096]);f.Flush(true);}

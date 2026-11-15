@@ -90,6 +90,11 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
         selected = Resolve();
         IscsiInitiator.CleanupStale(config.TargetIqn, config.ListenAddress, config.ListenPort);
         AssertNoExport();
+        if (selected.IsOnline)
+        {
+            using var volumes = VolumeQuiesce.Lock(selected.DiskNumber);
+            if (!PhysicalDiskHandle.TryOffline(selected.DiskNumber, out string offlineError)) throw new IOException(offlineError);
+        }
         if (SsdCacheService.LedgerExists(config))
         {
             using var verifier = new L2Verifier(config, selected.DiskNumber);

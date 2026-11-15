@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Real NTFS -> iSCSI -> FlyDisk -> disposable VHDX integration. CI ONLY.
-param([Parameter(Mandatory)][string]$Package)
+param([Parameter(Mandatory)][string]$Package,[switch]$AllowLocalDisposableVhd)
 $ErrorActionPreference='Stop'
-if($env:GITHUB_ACTIONS -ne 'true'){throw 'Run only on a disposable GitHub Windows runner.'}
-$root=Join-Path $env:RUNNER_TEMP ('flydisk-vhd-'+[guid]::NewGuid().ToString('N'))
+if($env:GITHUB_ACTIONS -ne 'true' -and -not $AllowLocalDisposableVhd){throw 'Explicit -AllowLocalDisposableVhd is required outside disposable CI.'}
+$tempParent=if($env:GITHUB_ACTIONS -eq 'true'){$env:RUNNER_TEMP}else{$env:TEMP}
+$root=Join-Path $tempParent ('flydisk-vhd-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $root | Out-Null
 $vhd=Join-Path $root 'source.vhdx'
 $install=Join-Path $env:ProgramFiles 'FlyDiskHeadless'
 $exe=Join-Path $install 'FlyDisk.Headless.exe'
+if(Get-Service FlyDiskHeadless -ErrorAction SilentlyContinue){throw 'Existing service: test refuses to replace it.'}
+if(Get-SmbShare -Name 'FlyDiskVhdTest' -ErrorAction SilentlyContinue){throw 'Existing share: test refuses to replace it.'}
 $statePath=Join-Path $env:ProgramData 'FlyDiskHeadless\status.json'
 $share='FlyDiskVhdTest'
 $report=[System.Collections.Generic.List[object]]::new()
@@ -15,7 +18,7 @@ $diagnostics=Join-Path (Get-Location) 'artifacts\vhd-diagnostics'
 New-Item -ItemType Directory -Path $diagnostics -Force | Out-Null
 function Assert([bool]$condition,[string]$message){if(-not $condition){throw $message}}
 function Pass([string]$name){$report.Add(@{test=$name;passed=$true;utc=[DateTime]::UtcNow});Write-Output "PASS $name"}
-function Cli([string[]]$arguments){$result=& $script:exe @arguments; $exit=$LASTEXITCODE; $result | Write-Host;if($exit -ne 0){throw "CLI failed ($exit): $arguments"}}
+function Invoke-FlyDisk([string[]]$arguments){$result=& $script:exe @arguments; $exit=$LASTEXITCODE; $result | Write-Host;if($exit -ne 0){throw "CLI failed ($exit): $arguments"}}
 function SourceDisk {Get-DiskImage -ImagePath $script:vhd | Get-Disk}
 function Wait-ServiceState([string]$state){
  $until=(Get-Date).AddSeconds(30)
@@ -82,11 +85,11 @@ try{
  $config=Join-Path $root 'config.json'
  @{SchemaVersion=1;DiskIdentity=$selected[0].Identity;ExpectedSizeBytes=$selected[0].Disk.SizeBytes;CacheVolume='C:';CacheSizeBytes=64MB;EnableMemoryCache=$false;RiskAccepted=$true;Language='en-US'} | ConvertTo-Json | Set-Content $config -Encoding utf8
  $cacheBefore=@(Get-ChildItem 'C:\FlyDisk.Cache' -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
- Cli -arguments @('install','--config',$config)
- Cli -arguments @('preflight')
+ Invoke-FlyDisk -arguments @('install','--config',$config)
+ Invoke-FlyDisk -arguments @('preflight')
  Assert (-not(SourceDisk).IsOffline) 'Preflight took the source offline'
  Pass 'VHD creation and non-mutating preflight'
- Cli -arguments @('start')
+ Invoke-FlyDisk -arguments @('start')
  Assert ((SourceDisk).IsOffline) 'Physical VHD was not taken offline'
  $clone=Get-Partition -DriveLetter $letter | Get-Disk
  Assert ($clone.BusType -eq 'iSCSI' -and -not $clone.IsOffline) 'Drive letter is not backed by the live iSCSI clone'
@@ -109,13 +112,13 @@ try{
  Remove-Item -LiteralPath $unc
  Remove-SmbShare -Name $share -Force
  Pass 'SMB file write/read/delete through accelerated NTFS'
- Cli -arguments @('stop')
+ Invoke-FlyDisk -arguments @('stop')
  Assert (-not(SourceDisk).IsOffline) 'Graceful stop left source offline'
  Check-Data $expected
  Pass 'Graceful stop returns original disk and intact file'
- Cli -arguments @('start')
+ Invoke-FlyDisk -arguments @('start')
  Check-Data $expected
- Cli -arguments @('stop')
+ Invoke-FlyDisk -arguments @('stop')
  Check-Data $expected
  Pass 'Existing cache verifies and restarts successfully'
  # Change the disk outside FlyDisk. Reusing stale L2 must fail and return the physical disk.
@@ -135,7 +138,7 @@ try{
  Assert ($cachePath.StartsWith('C:\FlyDisk.Cache\') -and $created[0].Name -match '^[A-Fa-f0-9]+$') 'Unexpected cache cleanup path'
  Assert (-not($created[0].Attributes -band [IO.FileAttributes]::ReparsePoint)) 'Cache is a reparse point'
  Remove-Item -LiteralPath $cachePath -Recurse -Force
- Cli -arguments @('start')
+ Invoke-FlyDisk -arguments @('start')
  Check-Data $changed
  $service=Get-CimInstance Win32_Service -Filter "Name='FlyDiskHeadless'"
  $process=Get-Process -Id $service.ProcessId
@@ -144,11 +147,11 @@ try{
  Wait-ServiceState 'Stopped'
  & $exe start | Write-Host
  Assert ($LASTEXITCODE -ne 0) 'Crash checkpoint was ignored'
- Cli -arguments @('recover')
+ Invoke-FlyDisk -arguments @('recover')
  Assert (-not(SourceDisk).IsOffline) 'Crash recovery left source offline'
  Check-Data $changed
  Pass 'Forced process crash preserves recovery checkpoint; recover restores intact file'
- Cli -arguments @('uninstall')
+ Invoke-FlyDisk -arguments @('uninstall')
  $report | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $diagnostics 'results.json')
 }
 finally{

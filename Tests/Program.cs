@@ -16,6 +16,8 @@ if (args.Length == 2 && args[0] == "--wal-benchmark")
     WriteBackTests.Benchmark(args[1]); return;
 }
 
+if (args.SequenceEqual(["--tmf-probe"])) { IscsiFailureTests.ProbeRunningTarget(); return; }
+
 if (args.SequenceEqual(["--service-fixture"]))
 {
     System.ServiceProcess.ServiceBase.Run(DiskService.Create(new ServiceFixture()));
@@ -257,6 +259,18 @@ finally
         Directory.Delete(root,true);
 }
 WriteBackTests.Run(Test, Check, Throws);
+Test("4GiB L1 ceiling allocates no slabs until demand", () => {
+    var cfg=new DiskConfig{EnableMemoryCache=true,EnableSsdCache=false,MemoryCacheMaxBytes=4L<<30,EvictionThreshold=.99,StopCachingThreshold=1};
+    var cache=new CacheService(cfg,new BlockSourceInfo{Model="TEST",SerialNumber="LAZY",SizeBytes=1<<20,BytesPerSector=512});
+    try{
+        Check(cache.TotalCacheSize==0,"L1 reserved its configured ceiling at startup");
+        cache.SetBlock(0,new byte[4096],0);
+        Check(cache.TotalCacheSize>0 && cache.TotalCacheSize<=64L<<20,"One read allocated more than one slab");
+    }finally{cache.Release();}
+    Check(cache.TotalCacheSize==0,"L1 failed to return slabs");
+});
+IscsiFailureTests.Run(Test, Check);
+RecoveryTests.Run(Test, Check);
 Console.WriteLine($"ALL {passed} TESTS PASSED");
 
 sealed class FakeBackend : IAcceleratorBackend

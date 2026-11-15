@@ -49,6 +49,7 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
             TargetIqn = HostConfig.Iqn, SectorsPerBlock = 4096 / selected.BytesPerSector,
             EnableMemoryCache = settings.EnableMemoryCache, MemoryCacheMaxBytes = settings.EnableWriteBack ? settings.ReadMemoryBudgetBytes : settings.MemoryCacheMaxBytes,
             EnableWriteBack = settings.EnableWriteBack, WriteJournalBytes = settings.JournalBudgetBytes,
+            SsdSparseAllocation = true,
             EnableAdaptivePrefetch = settings.EnableAdaptivePrefetch, PrefetchMaxBytes = settings.PrefetchMaxBytes, EnableSsdCache = true,
             SsdCachePath = SsdCacheService.GetDiskCacheDirectory(settings.CacheVolume, hash),
             SsdCacheMaxBytes = settings.EnableWriteBack ? settings.ReadCacheBudgetBytes : settings.CacheSizeBytes
@@ -65,10 +66,10 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
                 (index ? new FileInfo(Path.Combine(config.SsdCachePath, "index.bin")).Length : 0) +
                 (File.Exists(WriteBackJournal.PathFor(config.SsdCachePath)) ? new FileInfo(WriteBackJournal.PathFor(config.SsdCachePath)).Length : 0);
             // 上游槽位计算在查询失败时回退配置值；服务预检必须严格失败，不能因此放行满盘。
-            long budget = checked(new DriveInfo(settings.CacheVolume).AvailableFreeSpace + footprint - (1L << 30));
-            if (budget < settings.CacheSizeBytes + 4096) throw new IOException("Insufficient cache volume free space.");
-            if (SsdCacheService.ComputeSlotCountFor(config) < SsdCacheService.ConfiguredSlotCountFor(config))
-                throw new IOException("Insufficient SSD space after the 1 GiB reserve.");
+            // Configured capacity is a ceiling, not a reservation. Sparse files
+            // and L1 slabs grow on demand; only require startup working space.
+            if (new DriveInfo(settings.CacheVolume).AvailableFreeSpace < (1L << 30) + (64L << 20))
+                throw new IOException("Insufficient cache startup space after the 1 GiB reserve.");
         }
     }
 
@@ -196,6 +197,21 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
             throw new IOException("Source/clone disk enumeration is ambiguous.");
     }
 
+    public string? HealthError()
+    {
+        try
+        {
+            if (engine == null || !engine.IsRunning) return "Cache engine is not running.";
+            if (engine.ActiveIoAgeMilliseconds > 30000) return "A cache I/O has exceeded 30 seconds; safe drain/recovery is required.";
+            if (!IscsiInitiator.HasConnectedSession(HostConfig.Iqn)) return "iSCSI session is disconnected.";
+            bool clone = PhysicalDiskHandle.Enumerate().Any(d => d.BusType == 9 && d.IsOnline &&
+                d.SerialNumber.Trim() == selected!.SerialNumber.Trim() && d.SizeBytes == settings.ExpectedSizeBytes);
+            if (!clone) return "The exported cache disk is absent or offline.";
+            return null;
+        }
+        catch (Exception ex) { return "Export health is unknown: " + ex.Message; }
+    }
+
     public static bool IsIscsiBus(JsonElement value) => value.ValueKind switch
     {
         JsonValueKind.Number => value.GetInt32() == 9,
@@ -216,7 +232,7 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
         }
         using var raw = PhysicalDiskHandle.Open(selected.DiskNumber);
         var journal = new WriteBackJournal(raw, config.SsdCachePath,
-            SsdCacheService.ComputeIdentity(raw.ToBlockSourceInfo()), settings.JournalBudgetBytes, false);
+            SsdCacheService.ComputeIdentity(raw.ToBlockSourceInfo()), settings.JournalBudgetBytes, false, sparse: config.SsdSparseAllocation);
         try { journal.AssertRecoverySourceWasOffline(wasOnline); journal.Drain(); }
         finally { journal.CloseWithoutDrain(); } // 非后台恢复：失败必须保留日志且释放独占检查句柄。
     }

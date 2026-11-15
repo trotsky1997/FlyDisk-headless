@@ -39,7 +39,7 @@ jobs:
           path: artifacts/headless
       - name: Real virtual-disk iSCSI, NTFS, SMB and recovery acceptance
         shell: pwsh
-        run: ./Tests/Test-VirtualDisk.ps1 -Package ./artifacts/headless
+        run: ./Tests/Test-VirtualDisk.ps1 -Package ./artifacts/headless -ProtocolFixture ./Tests/bin/Release/net10.0-windows/FlyDisk.Headless.Tests.exe
       - uses: actions/upload-artifact@v4
         if: always()
         with:

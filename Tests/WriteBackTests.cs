@@ -22,7 +22,7 @@ static class WriteBackTests
     public static void CrashFixture(string dir)
     {
         using var s = new FileSource(Path.Combine(dir,"disk.bin"));
-        var j = new WriteBackJournal(s,dir,42,65536,false);
+        var j = new WriteBackJournal(s,dir,42,65536,false,sparse:true);
         j.Write(0,Enumerable.Repeat((byte)183,4096).ToArray(),0,4096);
         File.WriteAllText(Path.Combine(dir,"ack"),"durable");
         Thread.Sleep(Timeout.Infinite);
@@ -35,6 +35,44 @@ static class WriteBackTests
         byte[] Data(byte value, int n = 4096) => Enumerable.Repeat(value,n).ToArray();
         try
         {
+            test("Sparse WAL keeps a large logical ceiling without reserving its bytes", () => {
+                string dir=Dir();var s=new Source();
+                using var j=new WriteBackJournal(s,dir,42,32L<<30,false,sparse:true);
+                string path=WriteBackJournal.PathFor(dir);
+                check(new FileInfo(path).Length==8192,"Full journal ceiling was preallocated");
+                check((File.GetAttributes(path)&FileAttributes.SparseFile)!=0,"Journal is not sparse");
+                check(SparseFile.AllocatedBytes(path)<1<<20,"Empty sparse WAL reserves capacity");
+            });
+            test("Sparse 64GiB logical file allocates only written extents", () => {
+                string dir=Dir();Directory.CreateDirectory(dir);string path=Path.Combine(dir,"sparse.bin");
+                using var file=new FileStream(path,FileMode.CreateNew,FileAccess.ReadWrite,FileShare.ReadWrite);
+                SparseFile.Enable(file);file.SetLength(64L<<30);
+                file.Position=(64L<<30)-4096;file.Write(Data(17));file.Flush(true);
+                check(SparseFile.AllocatedBytes(path)<1<<20,"Logical ceiling consumes physical SSD capacity");
+                file.Position=(64L<<30)-4096;byte[] b=new byte[4096];file.ReadExactly(b);check(b.All(x=>x==17),"Sparse high-offset data changed");
+                SparseFile.Release(file,0,file.Length);file.Flush(true);
+                file.Position=(64L<<30)-4096;file.ReadExactly(b);check(b.All(x=>x==0),"Released sparse extent is not zero");
+            });
+            test("Sparse WAL validates pending records and only deallocates after durable HDD destage", () => {
+                string dir=Dir();var s=new Source();var j=new WriteBackJournal(s,dir,42,4<<20,false,sparse:true);
+                byte[] data=Data(61,1<<20);j.Write(0,data,0,data.Length);j.Write(0,Data(62,1<<20),0,1<<20);
+                string path=WriteBackJournal.PathFor(dir);long allocated=SparseFile.AllocatedBytes(path);
+                check(allocated>=2<<20,"Pending records were not physically stored");
+                j.CloseWithoutDrain();s.PowerLoss();
+                using var r=new WriteBackJournal(s,dir,42,4<<20,false,sparse:true);
+                byte[] read=new byte[1<<20];r.Read(0,read,0,read.Length);check(read.All(x=>x==62),"Sparse reopen lost pending data");
+                r.Drain();check(s.Stable.All(x=>x==62),"Sparse destage changed data");
+                check(SparseFile.AllocatedBytes(path)<128<<10,"Retired WAL extents still occupy SSD");
+                check(new FileInfo(path).Length>=2<<20,"Test did not exercise sparse holes");
+            });
+            foreach(string point in new[]{"record-durable","checkpoint-first","checkpoint-second","source-durable"})
+            test("Sparse WAL crash at "+point+" retains acknowledged data", () => {
+                var s=new Source();string dir=Dir();var j=new WriteBackJournal(s,dir,42,65536,false,sparse:true);
+                j.Write(0,Data(11),0,4096);j.FaultPoint=p=>{if(p==point)throw new IOException("power loss");};
+                if(point=="source-durable")throws(()=>j.DrainOne());else throws(()=>j.Write(4096,Data(22),0,4096));
+                j.CloseWithoutDrain();s.PowerLoss();using var r=new WriteBackJournal(s,dir,42,65536,false,sparse:true);r.Drain();
+                check(s.Stable[0]==11,"Sparse reclaim lost acknowledged prefix");
+            });
             test("WAL actual process kill preserves acknowledged write before HDD destage", () => {
                 string dir=Dir();Directory.CreateDirectory(dir);
                 var info=new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!){UseShellExecute=false,CreateNoWindow=true};

@@ -102,6 +102,10 @@ namespace FlyDisk.Engine
 
         /// <summary>正在执行中的 SCSI 命令数（0 或 1：命令是串行执行的）</summary>
         public bool IsIdle => Interlocked.Read(ref _inFlight) == 0;
+        private long _commandStartedTick;
+        public long ActiveIoAgeMilliseconds {
+            get { long started=Interlocked.Read(ref _commandStartedTick);return started==0 ? 0 : Math.Max(0,Environment.TickCount64-started); }
+        }
 
         /// <summary>
         /// 停服序列：之后的命令一律以 <see cref="IOException"/> 拒绝。
@@ -121,6 +125,7 @@ namespace FlyDisk.Engine
             {
                 if (_closed) throw new IOException(Locale.T("engine.disk.stopped"));
                 _idle.Reset();
+                Interlocked.Exchange(ref _commandStartedTick,Environment.TickCount64);
                 Interlocked.Increment(ref _inFlight);
             }
         }
@@ -129,7 +134,7 @@ namespace FlyDisk.Engine
         {
             lock (_lifecycleLock)
             {
-                if (Interlocked.Decrement(ref _inFlight) == 0) _idle.Set();
+                if (Interlocked.Decrement(ref _inFlight) == 0) { Interlocked.Exchange(ref _commandStartedTick,0);_idle.Set(); }
             }
         }
 

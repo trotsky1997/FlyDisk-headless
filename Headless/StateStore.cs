@@ -56,12 +56,17 @@ public sealed class StateStore(string directory, HostConfig config)
         }
     }
 
-    public void Heartbeat(Func<object?> snapshot, Func<object?>? preparingSnapshot = null)
+    public void Heartbeat(Func<object?> snapshot, Func<object?>? preparingSnapshot = null, Func<string?>? health = null)
     {
         lock (gate)
         {
             // Snapshot is allowed only while the backend is stable, not while its handles are disposed.
-            if (last?.Phase == "running") Write(last.Phase, last.Error, last.RecoveryRequired, snapshot());
+            if (last?.Phase is "running" or "degraded")
+            {
+                object? stats = snapshot();
+                string? error = health?.Invoke();
+                Write(error == null ? "running" : "degraded", error, last.RecoveryRequired, stats);
+            }
             else if (last?.Phase == "preparing" && preparingSnapshot != null)
                 Write(last.Phase, last.Error, last.RecoveryRequired, preparingSnapshot());
         }

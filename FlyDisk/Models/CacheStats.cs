@@ -25,6 +25,7 @@ namespace FlyDisk.Models
     /// </summary>
     public class CacheStats
     {
+        public long ActiveIoAgeMilliseconds { get; set; }
         public string SsdEvictionPolicy { get; set; } = "LRU";
         public long MemoryCacheMaxBytes { get; set; }
         public bool AdaptivePrefetchEnabled { get; set; }

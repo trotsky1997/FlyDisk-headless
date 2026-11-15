@@ -9,7 +9,7 @@ $data=Join-Path $env:ProgramData $name
 $fixtureData=Join-Path $env:ProgramData 'FlyDiskHeadlessServiceTest'
 if((Test-Path $install) -or (Test-Path $data) -or (Get-Service $name -ErrorAction SilentlyContinue)){throw 'Test isolation failed: existing installation.'}
 function Wait-State([string]$state){
- $until=(Get-Date).AddSeconds(30)
+ $until=(Get-Date).AddSeconds(50)
  do {$controller=Get-Service $name;try{if([string]$controller.Status -eq $state){return}}finally{$controller.Dispose()};Start-Sleep -Milliseconds 250} while((Get-Date)-lt $until)
  throw "Service did not reach $state"
 }
@@ -43,6 +43,18 @@ try{
  Start-Service $name
  Wait-State 'Running'
  if(-not(Test-Path (Join-Path $fixtureData 'started'))){throw 'OnStart not executed'}
+ Invoke-Cli -arguments @('configure-recovery')
+ $task=Get-ScheduledTask -TaskName 'FlyDiskHeadless-Recovery'
+ if($task.Principal.UserId -ne 'SYSTEM' -or $task.Actions.Arguments -ne 'supervise'){throw 'Recovery task is misconfigured'}
+ # Kill only the disposable non-disk service fixture; verify real SCM restart.
+ $original=Get-CimInstance Win32_Service -Filter "Name='$name'"
+ if($original.PathName -notlike '*--service-fixture'){throw 'Refusing to crash a non-fixture service'}
+ Stop-Process -Id $original.ProcessId -Force
+ Start-Sleep -Seconds 2
+ Wait-State 'Running'
+ $restarted=Get-CimInstance Win32_Service -Filter "Name='$name'"
+ if($restarted.ProcessId -eq $original.ProcessId -or $restarted.ProcessId -eq 0){throw 'SCM did not restart the killed fixture'}
+ Write-Output 'PASS actual SCM crash recovery restarts owned synthetic fixture'
  Set-Content (Join-Path $fixtureData 'refuse-stop') 'busy'
  & sc.exe stop $name
  Start-Sleep -Seconds 3
@@ -59,4 +71,5 @@ finally{
  # No forced process kill and no recursive filesystem deletion; the runner itself is disposable.
  $svc=Get-Service $name -ErrorAction SilentlyContinue
  if($svc){Remove-Item -LiteralPath (Join-Path $fixtureData 'refuse-stop') -ErrorAction SilentlyContinue;Stop-Service $name -ErrorAction Continue;& sc.exe delete $name}
+ Get-ScheduledTask -TaskName 'FlyDiskHeadless-Recovery' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
 }

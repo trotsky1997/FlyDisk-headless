@@ -90,7 +90,10 @@ try{
  Assert (-not(SourceDisk).IsOffline) 'Preflight took the source offline'
  Pass 'VHD creation and non-mutating preflight'
  Invoke-FlyDisk -arguments @('start')
- Assert ((SourceDisk).IsOffline) 'Physical VHD was not taken offline'
+ # Exclusive raw access intentionally hides the source from storage-provider association queries.
+ Start-Sleep -Seconds 6
+ $running=Get-Content $statePath -Raw | ConvertFrom-Json
+ Assert ($running.Phase -eq 'running' -and $running.Stats.Cache.DeviceWasOffline) 'Backend did not confirm offline source ownership'
  $clone=Get-Partition -DriveLetter $letter | Get-Disk
  Assert ($clone.BusType -eq 'iSCSI' -and -not $clone.IsOffline) 'Drive letter is not backed by the live iSCSI clone'
  Check-Data $expected

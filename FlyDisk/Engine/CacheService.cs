@@ -1159,9 +1159,12 @@ namespace FlyDisk.Engine
         /// </summary>
         private void VerifyStructure(int justRemoved)
         {
-            long used = Interlocked.Read(ref _usedSlots) - Interlocked.Read(ref _inFlightSlotOps);
+            long used = Interlocked.Read(ref _usedSlots);
+            long inFlight = Interlocked.Read(ref _inFlightSlotOps);
             long chained = Interlocked.Read(ref _chainedNodes);
-            if (used != chained)
+            // In-flight includes both pre-allocation and allocated-but-unpublished phases.
+            // Subtracting every operation falsely reports one missing slot during eviction.
+            if (Math.Abs(used - chained) > inFlight)
             {
                 LogService.DebugFile(
                     $"CacheService 淘汰自检：结构计数不一致 — 已占用槽位 {used} ≠ 链上节点 {chained}（本轮淘汰 {justRemoved} 块）");

@@ -14,6 +14,9 @@ public sealed record HostConfig
     public string CacheVolume { get; init; } = "";
     public long CacheSizeBytes { get; init; } = 32L << 30;
     public bool EnableMemoryCache { get; init; }
+    public long MemoryCacheMaxBytes { get; init; } = 2L << 30;
+    public bool EnableAdaptivePrefetch { get; init; }
+    public int PrefetchMaxBytes { get; init; } = 1 << 20;
     public bool RefreshChangedBlocks { get; init; } = true;
     public bool RiskAccepted { get; init; }
     public string Language { get; init; } = "zh-CN";
@@ -34,6 +37,11 @@ public sealed record HostConfig
             throw new ArgumentException("CacheSizeBytes must be 64 MiB aligned, between 64 MiB and 1 TiB.");
         if (ListenPort is < 1024 or > 65535) throw new ArgumentException("Invalid unprivileged iSCSI port.");
         if (Language is not ("zh-CN" or "en-US")) throw new ArgumentException("Language must be zh-CN or en-US.");
+        if (MemoryCacheMaxBytes < (64L << 20) || MemoryCacheMaxBytes > (16L << 30) || MemoryCacheMaxBytes % (64L << 20) != 0)
+            throw new ArgumentException("Memory cache must be 64 MiB aligned, between 64 MiB and 16 GiB.");
+        if (PrefetchMaxBytes < 65536 || PrefetchMaxBytes > (1 << 20) || PrefetchMaxBytes % 4096 != 0)
+            throw new ArgumentException("Prefetch limit must be 4 KiB aligned, from 64 KiB to 1 MiB.");
+        if (EnableAdaptivePrefetch && !EnableMemoryCache) throw new ArgumentException("Adaptive prefetch requires bounded L1 cache.");
         if (!RiskAccepted) throw new ArgumentException("Set RiskAccepted=true after reviewing the whole-disk takeover behavior.");
     }
 

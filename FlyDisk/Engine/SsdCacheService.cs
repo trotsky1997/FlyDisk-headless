@@ -178,8 +178,8 @@ namespace FlyDisk.Engine
         private readonly Dictionary<long, int> _blocksByIndex = new();
 
         // ===== M 的 FIFO 环（环形缓冲，不需要链表指针）=====
-        private readonly int[] _mRing;
-        private int _mHead, _mCount;
+        private readonly SlotLru _lru;
+        private int _mCount => _lru.Count;
 
         // ===== ghost 队列（只存块号，无数据）=====
         private readonly long[] _ghostRing;
@@ -245,7 +245,7 @@ namespace FlyDisk.Engine
             {
                 _slotCount = ComputeSlotCount(_dir, config.SsdCacheMaxBytes);
 
-                double ghostFraction = Clamp(config.SsdCacheGhostFraction, 0.0, 4.0);
+                double ghostFraction = 0; // Exact LRU admits demand reads directly; no ghost allocation.
                 if (Math.Abs(config.SsdCacheGhostFraction - ghostFraction) > 1e-9)
                 {
                     LogService.DebugFile(
@@ -269,7 +269,7 @@ namespace FlyDisk.Engine
                 _slotFlags = new byte[_slotCount];
                 Array.Fill(_slotBlockIndex, -1);
                 _freeStack = new int[_slotCount];
-                _mRing = new int[_mLimit + RING_SLACK];
+                _lru = new SlotLru(_slotCount);
                 _ghostRing = new long[Math.Max(1, _ghostLimit)];
 
                 long t0 = Environment.TickCount64;
@@ -991,7 +991,7 @@ namespace FlyDisk.Engine
             }
 
             // 分界用 _freeCount 而非 _usedSlots：作废产生的空洞在 _usedSlots 上已不计数，但那些槽拿不回来
-            if (!seen && _freeCount < _fillingReserve) return;
+            // Demand reads use exact LRU admission, independently of occupancy.
 
             AdmitToM(blockIndex, buffer, offset, resurrect: seen);
         }
@@ -1102,6 +1102,7 @@ namespace FlyDisk.Engine
                 InvalidateRange(blockIndex, 1);
                 return;
             }
+            NoteAccessSlot(slot);
             Interlocked.Increment(ref _writeUpdateBlocks);
         }
 
@@ -1136,7 +1137,8 @@ namespace FlyDisk.Engine
                 _slotBlockIndex[slot] = -1;
                 _slotFlags[slot] = 0;
                 Interlocked.Decrement(ref _usedSlots);
-                Interlocked.Increment(ref _holeSlots);
+                _lru.Remove(slot);
+                PushFree(slot);
                 Interlocked.Increment(ref _invalidatedBlocks);
             }
         }
@@ -1171,42 +1173,10 @@ namespace FlyDisk.Engine
         /// <summary>M 队列淘汰：FIFO-Reinsertion（第二次机会，计数 −1 后重排队尾）；计数为 0 才真淘汰</summary>
         private void EvictMain()
         {
-            int secondChances = 4;   // 上限：避免队尾全是"有计数"的块时长时间打转
-            while (_mCount > 0 && secondChances-- > 0)
-            {
-                int slot = PopRingM();
-                if (!SlotOccupied(slot))
-                {
-                    RecycleHole(slot);
-                    return;
-                }
-
-                byte freq = FreqOf(slot);
-                if (freq > 0)
-                {
-                    SetFreq(slot, (byte)(freq - 1));
-                    if (PushRingM(slot))
-                    {
-                        continue;   // 第二次机会
-                    }
-                    DiscardSlot(slot);   // 环满（理论不可达）：只能真淘汰，保证不留下"不在环上"的槽
-                    Interlocked.Increment(ref _evictMBlocks);
-                    return;
-                }
-
-                DiscardSlot(slot);   // M 的淘汰**不进 ghost**（与论文一致）
-                Interlocked.Increment(ref _evictMBlocks);
-                return;
-            }
-
-            // 兜底：保证每次调用至少让 M 长度减一，否则上层循环可能空转
-            if (_mCount > 0)
-            {
-                int slot = PopRingM();
-                if (SlotOccupied(slot)) DiscardSlot(slot);
-                else RecycleHole(slot);
-                Interlocked.Increment(ref _evictMBlocks);
-            }
+            if (_mCount == 0) return;
+            int slot = PopRingM();
+            if (SlotOccupied(slot)) { DiscardSlot(slot); Interlocked.Increment(ref _evictMBlocks); }
+            else RecycleHole(slot);
         }
 
         /// <summary>
@@ -1266,39 +1236,19 @@ namespace FlyDisk.Engine
         private byte FreqOf(int slot) => (byte)(_slotFlags[slot] & FREQ_MASK);
         private void SetFreq(int slot, byte value) => _slotFlags[slot] = (byte)((_slotFlags[slot] & ~FREQ_MASK) | (value & FREQ_MASK));
 
-        private void NoteAccessSlot(int slot)
+        private void NoteAccessSlot(int slot) => _lru.Touch(slot);
+
+        public void TouchExisting(long blockIndex)
         {
-            byte freq = FreqOf(slot);
-            if (freq < MAX_FREQ)
-            {
-                SetFreq(slot, (byte)(freq + 1));
-            }
+            if (!_frozen && TryFindInL2(blockIndex, out int slot)) _lru.Touch(slot);
         }
+        public bool ContainsBlock(long blockIndex) => TryFindInL2(blockIndex, out _);
 
         #endregion
 
-        #region 环形缓冲与空闲栈
-
-        /// <summary>入 M 队尾。**返回值必须检查**：环溢出（理论不可达）时调用方负责回退，否则会留下"不在任何环上"的槽。</summary>
-        private bool PushRingM(int slot)
-        {
-            if (_mCount >= _mRing.Length)
-            {
-                LogService.DebugFile($"SSD 二级缓存：M 环溢出（长度 {_mCount}），该块未入队");
-                return false;
-            }
-            _mRing[(_mHead + _mCount) % _mRing.Length] = slot;
-            _mCount++;
-            return true;
-        }
-
-        private int PopRingM()
-        {
-            int slot = _mRing[_mHead];
-            _mHead = (_mHead + 1) % _mRing.Length;
-            _mCount--;
-            return slot;
-        }
+        #region LRU and free slots
+        private bool PushRingM(int slot) { _lru.Touch(slot); return true; }
+        private int PopRingM() => _lru.PopOldest();
 
         private int PopFree()
         {
@@ -1483,7 +1433,7 @@ namespace FlyDisk.Engine
         {
             _blocksByIndex.Clear();
             _ghostSet.Clear();
-            _mHead = _mCount = 0;
+            _lru.Clear();
             _ghostHead = _ghostCount = 0;
             Array.Fill(_slotBlockIndex, -1L);
             Array.Fill(_slotFlags, (byte)0);
@@ -1550,9 +1500,9 @@ namespace FlyDisk.Engine
 
             // 2) 环上跳过空洞：写出去的顺序 = 内存顺序去掉空洞，**相对顺序不变**
             int mCountWrite = 0;
-            for (int i = 0; i < _mCount; i++)
+            foreach (int slot in _lru.OldestFirst())
             {
-                if (SlotOccupied(_mRing[(_mHead + i) % _mRing.Length])) mCountWrite++;
+                if (SlotOccupied(slot)) mCountWrite++;
             }
             int usedSlotsWrite = (int)Interlocked.Read(ref _usedSlots);
             long generation = Interlocked.Increment(ref _generation);
@@ -1591,7 +1541,7 @@ namespace FlyDisk.Engine
                 {
                     using (var bw = new BinaryWriter(body, Encoding.UTF8, leaveOpen: true))
                     {
-                        WriteRing(bw, _mRing, _mHead, _mCount);
+                        WriteRing(bw);
                         for (int i = 0; i < _ghostCount; i++)
                         {
                             bw.Write(_ghostRing[(_ghostHead + i) % _ghostRing.Length]);
@@ -1624,11 +1574,10 @@ namespace FlyDisk.Engine
         /// 写一个 FIFO 环：每个有效条目 = (槽号, 全局块号, 标志位)。**空洞压缩掉**，相对顺序不变。
         /// 阶段一这里还要写"文件 id + 文件内块号 + 全部文件表"，块设备下整个文件表都消失了。
         /// </summary>
-        private void WriteRing(BinaryWriter bw, int[] ring, int head, int count)
+        private void WriteRing(BinaryWriter bw)
         {
-            for (int i = 0; i < count; i++)
+            foreach (int slot in _lru.OldestFirst())
             {
-                int slot = ring[(head + i) % ring.Length];
                 if (!SlotOccupied(slot)) continue;
                 bw.Write(slot);
                 bw.Write(_slotBlockIndex[slot]);
@@ -1699,7 +1648,7 @@ namespace FlyDisk.Engine
                 {
                     using (var br = new BinaryReader(body, Encoding.UTF8, leaveOpen: true))
                     {
-                        if (!ReadRing(br, _mRing, ref _mHead, ref _mCount, mCount, ringed, ref registered, ref dropped))
+                        if (!ReadRing(br, mCount, ringed, ref registered, ref dropped))
                             return false;
 
                         // ghost：超出新上限的部分丢弃，**保留较新的那批**（跳过最老的，与 FIFO 语义一致）；
@@ -1753,7 +1702,7 @@ namespace FlyDisk.Engine
         }
 
         /// <summary>读一个 FIFO 环：按 (槽号, 全局块号, 标志位) 逐条重建块索引；空洞（块号 &lt; 0）压缩掉</summary>
-        private bool ReadRing(BinaryReader br, int[] ring, ref int head, ref int count, int entryCount,
+        private bool ReadRing(BinaryReader br, int entryCount,
             bool[] ringed, ref int registered, ref int dropped)
         {
             int read = 0;
@@ -1778,11 +1727,10 @@ namespace FlyDisk.Engine
                 if (!_blocksByIndex.TryAdd(blockIndex, slot)) return false;   // 同一个块号不能被两个槽登记
 
                 registered++;
-                ring[read++] = slot;
+                _lru.Touch(slot); read++;
             }
 
-            head = 0;
-            count = read;
+
             return true;
         }
 

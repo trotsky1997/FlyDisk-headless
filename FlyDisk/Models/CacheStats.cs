@@ -25,6 +25,14 @@ namespace FlyDisk.Models
     /// </summary>
     public class CacheStats
     {
+        public string SsdEvictionPolicy { get; set; } = "LRU";
+        public long MemoryCacheMaxBytes { get; set; }
+        public bool AdaptivePrefetchEnabled { get; set; }
+        public int PrefetchWindowBytes { get; set; }
+        public long PrefetchedBlocks { get; set; }
+        public long PrefetchUsefulBlocks { get; set; }
+        public long PrefetchWastedBlocks { get; set; }
+        public long PrefetchFailures { get; set; }
         public DateTime Timestamp { get; set; } = DateTime.Now;
 
         // ===== 目标与设备 =====

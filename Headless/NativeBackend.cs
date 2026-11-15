@@ -47,7 +47,8 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
             WarningAccepted = true, Language = settings.Language,
             EnableAutoIscsiLogin = true, ListenAddress = "127.0.0.1", ListenPort = settings.ListenPort,
             TargetIqn = HostConfig.Iqn, SectorsPerBlock = 4096 / selected.BytesPerSector,
-            EnableMemoryCache = settings.EnableMemoryCache, EnableSsdCache = true,
+            EnableMemoryCache = settings.EnableMemoryCache, MemoryCacheMaxBytes = settings.MemoryCacheMaxBytes,
+            EnableAdaptivePrefetch = settings.EnableAdaptivePrefetch, PrefetchMaxBytes = settings.PrefetchMaxBytes, EnableSsdCache = true,
             SsdCachePath = SsdCacheService.GetDiskCacheDirectory(settings.CacheVolume, hash),
             SsdCacheMaxBytes = settings.CacheSizeBytes
         };

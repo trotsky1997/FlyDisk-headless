@@ -124,6 +124,32 @@ try{
  Invoke-FlyDisk -arguments @('stop')
  Check-Data $expected
  Pass 'Existing cache verifies and restarts successfully'
+ # Exercise real unbuffered IO with bounded L1 and adaptive read-ahead enabled.
+ $installedConfig=Join-Path $env:ProgramData 'FlyDiskHeadless\config.json'
+ $adaptiveConfig=Get-Content $installedConfig -Raw | ConvertFrom-Json
+ $adaptiveConfig.EnableMemoryCache=$true
+ $adaptiveConfig.MemoryCacheMaxBytes=2GB
+ $adaptiveConfig.EnableAdaptivePrefetch=$true
+ $adaptiveConfig | ConvertTo-Json | Set-Content $installedConfig -Encoding utf8
+ $aheadFile=$letter+':\read-ahead.bin'
+ $aheadBytes=New-Object byte[] (16MB);[Random]::new(991).NextBytes($aheadBytes)
+ $aheadStream=[IO.FileStream]::new($aheadFile,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,65536,[IO.FileOptions]::WriteThrough)
+ try{$aheadStream.Write($aheadBytes,0,$aheadBytes.Length);$aheadStream.Flush($true)}finally{$aheadStream.Dispose()}
+ $aheadHash=(Get-FileHash $aheadFile).Hash
+ Invoke-FlyDisk -arguments @('start')
+ Assert ([DirectFileRead]::Hash($aheadFile) -eq $aheadHash) 'Read-ahead returned incorrect file data'
+ Assert ([DirectFileRead]::Hash($aheadFile) -eq $aheadHash) 'Warm L1 returned incorrect file data'
+ Start-Sleep -Seconds 6
+ $adaptive=Get-Content $statePath -Raw | ConvertFrom-Json
+ $adaptive | ConvertTo-Json -Depth 12 | Set-Content (Join-Path $diagnostics 'adaptive-lru.json')
+ Assert ($adaptive.Stats.Cache.L1HitBlocksTotal -gt 0) 'L1 did not serve reads'
+ Assert ($adaptive.Stats.Cache.PrefetchUsefulBlocks -gt 0) 'Adaptive prefetch did not serve future demand'
+ Assert ($adaptive.Stats.Cache.TotalCacheSize -le 2GB -and $adaptive.Stats.Cache.MemoryCacheMaxBytes -eq 2GB) 'L1 byte budget violated'
+ Assert ($adaptive.Stats.Cache.SsdEvictionPolicy -eq 'LRU') 'Wrong SSD eviction policy'
+ Remove-Item -LiteralPath $aheadFile
+ Invoke-FlyDisk -arguments @('stop')
+ Check-Data $expected
+ Pass 'Real 2GiB bounded L1 and adaptive read-ahead serve intact NTFS data with LRU'
  # Change the disk outside FlyDisk. Reusing stale L2 must fail and return the physical disk.
  $bytes[0]=$bytes[0] -bxor 255
  [IO.File]::WriteAllBytes($file,$bytes)

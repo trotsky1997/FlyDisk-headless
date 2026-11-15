@@ -111,6 +111,7 @@ namespace FlyDisk.Engine
 
         // ===== 块索引：全局块号 → （槽位 + 时间轮节点）=====
         private readonly ConcurrentDictionary<long, SlotRef> _blocks = new();
+        private readonly HashSet<long> _prefetched = new(); // guarded by _wheelLock; bounded by L1 residency
 
         // ===== 时间轮（环形桶 + 冷尾链）=====
         // 桶下标 = 绝对秒 % _windowSeconds；桶里的节点只记自己的绝对秒 Epoch，
@@ -269,6 +270,7 @@ namespace FlyDisk.Engine
         /// </summary>
         public CacheStats FillSnapshot(CacheStats stats)
         {
+            stats.MemoryCacheMaxBytes = _config.MemoryCacheMaxBytes;
             stats.TotalCacheSize = TotalCacheSize;
             stats.UsedSlots = UsedSlots;
             stats.FreeSlots = FreeSlots;
@@ -354,6 +356,7 @@ namespace FlyDisk.Engine
             lock (_wheelLock)
             {
                 _blocks.Clear();
+                _prefetched.Clear();
                 _nodeChunks.Clear();
                 Array.Fill(_bucketHead, -1);
                 Array.Fill(_bucketTail, -1);
@@ -481,6 +484,11 @@ namespace FlyDisk.Engine
             {
                 // 双重检查，防止并发分配多个 Slab
                 if (TakeFreeSlot(out slot)) return slot;
+                if (Interlocked.Read(ref _totalSlots) * BLOCK_SIZE >= _config.MemoryCacheMaxBytes)
+                {
+                    EvictBatch(1, force: true);
+                    return TakeFreeSlot(out slot) ? slot : null;
+                }
                 return AllocateSlabLocked();
             }
         }
@@ -639,6 +647,10 @@ namespace FlyDisk.Engine
             // 读路径上没有任何"到点写盘"的检查：L2 的账本只在停服时落一次盘（见 SsdCacheService 类注释）
             if (_config.EnableMemoryCache && InternalTryGetBlock(blockIndex, buffer, offset))
             {
+                bool promote;
+                lock (_wheelLock) promote = _prefetched.Remove(blockIndex);
+                if (promote) _ssd?.Insert(blockIndex, buffer, offset);
+                else _ssd?.TouchExisting(blockIndex);
                 Interlocked.Increment(ref _hitBlocks);
                 RecordReadOutcome(OutcomeL1);
                 return true;
@@ -712,6 +724,20 @@ namespace FlyDisk.Engine
         /// 写入块数据到缓存：L1 受内存水位约束，L2（写穿）**不受水位影响**——
         /// L2 是磁盘缓存，内存吃紧时它仍应继续学习，否则"刚开机/低内存"的加速场景会失去意义（§7.4）。
         /// </summary>
+        public bool CanPrefetch => CanCache();
+        public bool ContainsBlock(long blockIndex) => _blocks.ContainsKey(blockIndex) || (_ssd?.ContainsBlock(blockIndex) ?? false);
+        public bool SetPrefetchedBlock(long blockIndex, byte[] buffer, int offset)
+        {
+            if (!CanCache()) return false;
+            InternalSetBlock(blockIndex, buffer, offset);
+            lock (_wheelLock)
+            {
+                if (!_blocks.ContainsKey(blockIndex)) return false;
+                _prefetched.Add(blockIndex);
+                return true;
+            }
+        }
+
         public void SetBlock(long blockIndex, byte[] buffer, int offset)
         {
             if (CanCache())
@@ -868,6 +894,7 @@ namespace FlyDisk.Engine
                 {
                     if (_blocks.TryRemove(blockIndex, out SlotRef slotRef))
                     {
+                        _prefetched.Remove(blockIndex);
                         Interlocked.Decrement(ref _cachedBlocks);
                         UnlinkAndReturnSlot(slotRef);
                     }
@@ -1031,7 +1058,7 @@ namespace FlyDisk.Engine
             AdvanceTo(now);
             ref CacheNode node = ref NodeAt(index);
             if (node.BlockIndex < 0) return;
-            if (node.Epoch == now) return;
+            // Same-second hits also move to MRU, preserving exact access order.
 
             Unlink(index);
             LinkToBucket(index, NormalizeBucket(now), now);
@@ -1041,7 +1068,7 @@ namespace FlyDisk.Engine
         /// 按 LRU 摘除最多 <paramref name="budget"/> 个块，返回实际摘到的块数。
         /// 顺序：冷尾链（最冷）→ 窗口内最老桶 → 较新的桶，**跳过当前桶与宽限桶**。
         /// </summary>
-        private int EvictBatch(int budget)
+        private int EvictBatch(int budget, bool force = false)
         {
             long startTicks = Environment.TickCount64;
             int removed = 0;
@@ -1059,7 +1086,7 @@ namespace FlyDisk.Engine
 
                 // 2) 窗口内最老 → 较新，跳过当前桶与宽限桶；读取另由同一把轮锁保护。
                 int oldest = _coldBaseEpoch + 1;
-                int newest = now - _graceSeconds;
+                int newest = force ? now : now - _graceSeconds;
                 for (int epoch = oldest; epoch <= newest && removed < budget; epoch++)
                 {
                     int bucket = NormalizeBucket(epoch);
@@ -1095,6 +1122,7 @@ namespace FlyDisk.Engine
         {
             ref CacheNode node = ref NodeAt(index);
             long blockIndex = node.BlockIndex;
+            _prefetched.Remove(blockIndex);
 
             bool freed = false;
             if (blockIndex >= 0 && _blocks.TryRemove(blockIndex, out SlotRef slotRef))

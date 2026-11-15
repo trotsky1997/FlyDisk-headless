@@ -295,7 +295,7 @@ namespace FlyDisk.Engine
             _sourceInfo = info;
 
             _cache = new CacheService(_config, info);
-            _disk = new CachedPhysicalDisk(source, _cache);
+            _disk = new CachedPhysicalDisk(source, _cache, _config);
 
             var target = new ISCSITarget(_config.TargetIqn, new List<Disk> { _disk });
             target.OnStandardInquiry += Target_OnStandardInquiry;
@@ -807,6 +807,12 @@ namespace FlyDisk.Engine
             };
 
             _cache?.FillSnapshot(stats);
+            stats.AdaptivePrefetchEnabled = _disk?.ReadAhead != null;
+            stats.PrefetchWindowBytes = _disk?.ReadAhead?.WindowBytes ?? 0;
+            stats.PrefetchedBlocks = _disk?.ReadAhead?.FetchedBlocks ?? 0;
+            stats.PrefetchUsefulBlocks = _disk?.ReadAhead?.UsefulBlocks ?? 0;
+            stats.PrefetchWastedBlocks = _disk?.ReadAhead?.WastedBlocks ?? 0;
+            stats.PrefetchFailures = _disk?.ReadAhead?.Failures ?? 0;
 
             // 运行期复核源盘属性（只在变化时落盘，见 TraceSourceDiskAttributes）：
             // 盯住「我们的脱机有没有被系统回滚成联机」——"倒置"现象的现场取证。

@@ -123,6 +123,69 @@ try
         store.Write("stopped",null,false); store.AssertReadyForStart();
     });
 
+    Test("exact slot LRU matches independent reference under random touches/removals",()=>{
+        var lru=new SlotLru(37);var reference=new List<int>();var rng=new Random(927);
+        for(int i=0;i<10000;i++){
+            int slot=rng.Next(37);
+            if(rng.Next(3)==0){lru.Remove(slot);reference.Remove(slot);}
+            else {lru.Touch(slot);reference.Remove(slot);reference.Add(slot);}
+            Check(lru.Count==reference.Count && lru.OldestFirst().SequenceEqual(reference),"LRU order diverged");
+            if(i%17==0 && reference.Count>0){Check(lru.PopOldest()==reference[0],"Wrong eviction");reference.RemoveAt(0);}
+        }
+    });
+    Test("SSD evicts actual LRU, reclaims invalidation and persists recency",()=>{
+        var cfg=new DiskConfig{EnableMemoryCache=false,EnableSsdCache=true,SsdCachePath=Path.Combine(root,"lru"),SsdCacheMaxBytes=64L<<20};
+        var info=new BlockSourceInfo{Model="TEST",SerialNumber="LRU",SizeBytes=128L<<20,BytesPerSector=512};
+        var data=new byte[4096];var cache=new CacheService(cfg,info);
+        try{
+            for(int i=0;i<16384;i++){BitConverter.GetBytes(i).CopyTo(data,0);cache.SetBlock(i,data,0);}
+            Check(cache.TryGetBlock(0,data,0),"Missing hot block");cache.SetBlock(16384,data,0);
+            Check(cache.SsdCache!.ContainsBlock(0) && !cache.SsdCache.ContainsBlock(1),"Not LRU");
+            cache.InvalidateRange(2,1);cache.SetBlock(16385,data,0);
+            Check(cache.SsdCache.ContainsBlock(3),"Invalidation failed to recycle slot");
+            cache.FreezeForShutdown();cache.CommitLedger(LedgerCommit.Clean);
+        }finally{cache.Release();}
+        cache=new CacheService(cfg,info);
+        try{cache.SetBlock(16386,data,0);Check(!cache.SsdCache!.ContainsBlock(3) && cache.SsdCache.ContainsBlock(0),"Restart lost recency");}
+        finally{cache.Release();}
+    });
+    Test("L1 enforces hard byte cap and replaces oldest including same-second hits",()=>{
+        var cfg=new DiskConfig{EnableMemoryCache=true,MemoryCacheMaxBytes=64L<<20,EnableSsdCache=false,EvictionThreshold=0.99,StopCachingThreshold=1};
+        var info=new BlockSourceInfo{Model="TEST",SerialNumber="L1",SizeBytes=128L<<20,BytesPerSector=512};
+        var cache=new CacheService(cfg,info);var bytes=new byte[4096];
+        try{
+            for(int i=0;i<16384;i++)cache.SetBlock(i,bytes,0);
+            Check(cache.TryGetBlock(0,bytes,0),"L1 absent");cache.SetBlock(16384,bytes,0);
+            Check(cache.ContainsBlock(0) && !cache.ContainsBlock(1),"L1 did not evict oldest");
+            Check(cache.FillSnapshot(new()).TotalCacheSize<=64L<<20,"L1 exceeded hard cap");
+        }finally{cache.Release();}
+    });
+    foreach(int sector in new[]{512,4096}) Test($"{sector}: adaptive prefetch grows, backs off, preserves writes and EOF",()=>{
+        var cfg=new DiskConfig{EnableMemoryCache=true,MemoryCacheMaxBytes=64L<<20,EnableSsdCache=false,EnableAdaptivePrefetch=true,PrefetchMaxBytes=1<<20,EvictionThreshold=.99,StopCachingThreshold=1};
+        var raw=new FakeSource(8<<20,sector);var info=new BlockSourceInfo{Model="TEST",SerialNumber="PREFETCH",SizeBytes=raw.SizeBytes,BytesPerSector=sector};
+        var cache=new CacheService(cfg,info);var disk=new CachedPhysicalDisk(raw,cache,cfg);
+        try{
+            for(int i=0;i<16;i++)Check(disk.ReadSectors(i*65536/sector,65536/sector).SequenceEqual(raw.Data.Skip(i*65536).Take(65536)),"Sequential data differs");
+            Check(disk.ReadAhead!.FetchedBlocks>0 && disk.ReadAhead.UsefulBlocks>0 && disk.ReadAhead.WindowBytes>65536,"Prefetch did not adapt");
+            long fetched=disk.ReadAhead.FetchedBlocks;disk.ReadSectors((6<<20)/sector,4096/sector);
+            Check(disk.ReadAhead.FetchedBlocks==fetched && disk.ReadAhead.WindowBytes==65536,"Random access still prefetches");
+            var changed=Enumerable.Repeat((byte)217,sector).ToArray();disk.WriteSectors((1<<20)/sector,changed);
+            Check(disk.ReadSectors((1<<20)/sector,4096/sector).SequenceEqual(raw.Data.Skip(1<<20).Take(4096)),"Write left stale prefetch");
+            disk.ReadSectors(raw.SizeBytes/sector-16,8);disk.ReadSectors(raw.SizeBytes/sector-8,8);
+            Check(disk.ReadAhead.Failures==0,"Prefetch crossed disk end");
+        }finally{disk.Close();cache.Release();}
+    });
+    Test("speculative read failure does not fail demand read and enters cooldown",()=>{
+        var cfg=new DiskConfig{EnableMemoryCache=true,MemoryCacheMaxBytes=64L<<20,EnableAdaptivePrefetch=true,EnableSsdCache=false,EvictionThreshold=.99,StopCachingThreshold=1};
+        var raw=new FakeSource(4<<20,512);var cache=new CacheService(cfg,new BlockSourceInfo{Model="TEST",SerialNumber="FAIL",SizeBytes=raw.SizeBytes,BytesPerSector=512});
+        var disk=new CachedPhysicalDisk(raw,cache,cfg);
+        try{disk.ReadSectors(0,128);raw.FailReadAt=131072;
+            Check(disk.ReadSectors(128,128).SequenceEqual(raw.Data.Skip(65536).Take(65536)),"Speculation failed demand");
+            Check(disk.ReadAhead!.Failures==1,"Failure not reported");raw.FailReadAt=null;
+            long before=disk.ReadAhead.FetchedBlocks;disk.ReadSectors(256,128);Check(before==disk.ReadAhead.FetchedBlocks,"Cooldown ignored");
+        }finally{disk.Close();cache.Release();}
+    });
+
     foreach(int sector in new[]{512,4096})
     {
         string cacheDir=Path.Combine(root,"cache-"+sector);
@@ -198,10 +261,10 @@ sealed class FakeBackend : IAcceleratorBackend
 }
 sealed class FakeSource : IBlockSource
 {
-    public byte[] Data; public int Reads; public bool FailWrite;
+    public byte[] Data; public int Reads; public bool FailWrite; public long? FailReadAt;
     public FakeSource(int size,int sector){Data=new byte[size];new Random(42).NextBytes(Data);BytesPerSector=sector;}
     public int BytesPerSector{get;} public long SizeBytes=>Data.Length;
-    public void Read(long offset,byte[] target,int targetOffset,int count){Reads++;Array.Copy(Data,offset,target,targetOffset,count);}
+    public void Read(long offset,byte[] target,int targetOffset,int count){Reads++;if(FailReadAt.HasValue && offset>=FailReadAt.Value)throw new IOException("injected read");Array.Copy(Data,offset,target,targetOffset,count);}
     public void Write(long offset,byte[] source,int sourceOffset,int count){Array.Copy(source,sourceOffset,Data,offset,FailWrite?BytesPerSector:count);if(FailWrite)throw new IOException("partial source write");}
     public void Dispose(){}
 }

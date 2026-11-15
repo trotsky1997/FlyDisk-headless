@@ -150,6 +150,9 @@ namespace FlyDisk.Models
 
         /// <summary>是否启用内存缓存（关闭后仅透传）</summary>
         public bool EnableMemoryCache { get; set; } = true;
+        public long MemoryCacheMaxBytes { get; set; } = 2L << 30;
+        public bool EnableAdaptivePrefetch { get; set; }
+        public int PrefetchMaxBytes { get; set; } = 1 << 20;
 
         /// <summary>开始淘汰的系统内存占用比例（达到后不再扩池，改为按 LRU 回收最冷的块）</summary>
         public double EvictionThreshold { get; set; } = 0.8;

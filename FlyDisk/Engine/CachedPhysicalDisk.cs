@@ -63,6 +63,7 @@ namespace FlyDisk.Engine
 
         private readonly IBlockSource _raw;
         private readonly CacheService _cache;
+        public AdaptiveReadAhead? ReadAhead { get; }
         private readonly byte[] _scratch = new byte[BlockSize];               // 单工作线程串行 ⇒ 可复用
         private readonly byte[] _readBuffer = new byte[MaxMergedReadBytes];   // 合并回源的中转缓冲（同上，可复用）
 
@@ -76,10 +77,12 @@ namespace FlyDisk.Engine
         private readonly object _lifecycleLock = new();
         private readonly ManualResetEventSlim _idle = new(true);
 
-        public CachedPhysicalDisk(IBlockSource raw, CacheService cache)
+        public CachedPhysicalDisk(IBlockSource raw, CacheService cache, DiskConfig? config = null)
         {
             _raw = raw;
             _cache = cache;
+            if (config is { EnableAdaptivePrefetch: true, EnableMemoryCache: true })
+                ReadAhead = new AdaptiveReadAhead(config.PrefetchMaxBytes);
         }
 
         public override int BytesPerSector => _raw.BytesPerSector;
@@ -161,6 +164,7 @@ namespace FlyDisk.Engine
                     throw new ArgumentOutOfRangeException(nameof(sectorCount), $"单条读请求 {totalBytesLong} 字节超出上限");
                 int totalBytes = (int)totalBytesLong;
                 long requestEnd = requestStart + totalBytes;
+                int prefetchBytes = ReadAhead?.Observe(requestStart, requestEnd, _cache.ContainsBlock) ?? 0;
 
                 var result = new byte[totalBytes];
                 long firstBlock = requestStart / BlockSize;
@@ -202,6 +206,7 @@ namespace FlyDisk.Engine
                 Interlocked.Increment(ref _readCommands);
                 Interlocked.Add(ref _readSectors, sectorCount);
                 if (fullHit) Interlocked.Increment(ref _readFullHitCommands);
+                Prefetch(requestEnd, prefetchBytes);
                 return result;
             }
             finally
@@ -217,6 +222,31 @@ namespace FlyDisk.Engine
         /// 合并的前提是"这整段在源上都是完整块"——盘容量不是 4 KB 整数倍时最后一块只有一部分在源上，
         /// 所以先按 <c>Size / BlockSize</c> 裁掉尾部，剩下的（最多一块）退回单块处理。
         /// </summary>
+        private void Prefetch(long end, int budget)
+        {
+            if (budget == 0 || !_cache.CanPrefetch || ReadAhead == null) return;
+            long first = (end + BlockSize - 1) / BlockSize;
+            long limit = Math.Min(Size / BlockSize, first + budget / BlockSize);
+            try
+            {
+                for (long block = first; block < limit;)
+                {
+                    if (_cache.ContainsBlock(block)) { block++; continue; }
+                    long run = block++;
+                    while (block < limit && !_cache.ContainsBlock(block)) block++;
+                    int count = checked((int)(block - run));
+                    _raw.Read(run * BlockSize, _readBuffer, 0, count * BlockSize);
+                    for (int i = 0; i < count; i++)
+                        if (_cache.SetPrefetchedBlock(run + i, _readBuffer, i * BlockSize)) ReadAhead.Record(run + i);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Speculative IO must never fail a successfully completed demand read.
+                ReadAhead.Failed();
+            }
+        }
+
         private void ReadMissedRun(long runStart, int runBlocks, byte[] result, long requestStart, long requestEnd)
         {
             long wholeBlocks = Size / BlockSize;
@@ -286,6 +316,7 @@ namespace FlyDisk.Engine
             EnterCommand();
             try
             {
+                ReadAhead?.Reset();
                 int bytesPerSector = BytesPerSector;
                 if (data.Length == 0) return;
                 if (data.Length % bytesPerSector != 0)

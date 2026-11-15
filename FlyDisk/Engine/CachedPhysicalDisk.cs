@@ -224,7 +224,7 @@ namespace FlyDisk.Engine
         /// </summary>
         private void Prefetch(long end, int budget)
         {
-            if (budget == 0 || !_cache.CanPrefetch || ReadAhead == null) return;
+            if (budget == 0 || !_cache.CanPrefetch || ReadAhead == null || _raw is WriteBackJournal { HasPendingWrites: true }) return;
             long first = (end + BlockSize - 1) / BlockSize;
             long limit = Math.Min(Size / BlockSize, first + budget / BlockSize);
             try

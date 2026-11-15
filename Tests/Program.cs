@@ -7,6 +7,11 @@ using FlyDisk.Engine;
 using FlyDisk.Headless;
 using FlyDisk.Models;
 
+if (args.Length == 2 && args[0] == "--wal-crash-fixture")
+{
+    WriteBackTests.CrashFixture(args[1]); return;
+}
+
 if (args.SequenceEqual(["--service-fixture"]))
 {
     System.ServiceProcess.ServiceBase.Run(DiskService.Create(new ServiceFixture()));
@@ -247,6 +252,7 @@ finally
     if(Path.GetFullPath(root)==Path.GetFullPath(expected) && Path.GetFileName(root).StartsWith("flydisk-headless-tests-"))
         Directory.Delete(root,true);
 }
+WriteBackTests.Run(Test, Check, Throws);
 Console.WriteLine($"ALL {passed} TESTS PASSED");
 
 sealed class FakeBackend : IAcceleratorBackend

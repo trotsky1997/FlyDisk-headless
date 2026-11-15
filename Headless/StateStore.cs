@@ -29,11 +29,16 @@ public sealed class StateStore(string directory, HostConfig config)
             throw new IOException("Pending recovery belongs to another configuration. Restore its original config and recover before changing disks or cache settings.");
     }
 
-    public void AssertReadyForStart()
+    public void AssertReadyForStart() => AssertReadyForStart(false);
+    public void AssertReadyForStart(bool allowJournalRecovery)
     {
         AssertRecoveryConfigMatches();
-        if (File.Exists(PathName) && JsonSerializer.Deserialize<HostState>(File.ReadAllText(PathName), Json) is { RecoveryRequired: true })
-            throw new IOException("An unfinished takeover is recorded. Run recover before starting; the recovery checkpoint has been preserved.");
+        if (File.Exists(PathName) && JsonSerializer.Deserialize<HostState>(File.ReadAllText(PathName), Json) is { RecoveryRequired: true } state)
+        {
+            if (!allowJournalRecovery || !config.EnableWriteBack || IsAlive(state))
+                throw new IOException("An unfinished takeover is recorded. Run recover before starting; the recovery checkpoint has been preserved.");
+            // 配置完全匹配且旧进程已死；Prepare 必须重放 WAL，再允许 export。
+        }
     }
 
     public void Write(string phase, string? error, bool recoveryRequired, object? stats = null)

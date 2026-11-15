@@ -14,6 +14,12 @@ public sealed record HostConfig
     public string CacheVolume { get; init; } = "";
     public long CacheSizeBytes { get; init; } = 32L << 30;
     public bool EnableMemoryCache { get; init; }
+    public bool EnableWriteBack { get; init; }
+    // 总预算包含日志、读缓存和元数据；不给写缓冲额外叠加一份容量。
+    public long JournalBudgetBytes => CacheSizeBytes / 2 / 4096 * 4096;
+    public long ReadCacheBudgetBytes => (CacheSizeBytes - JournalBudgetBytes - Math.Max(64L << 20, CacheSizeBytes / 128)) / (64L << 20) * (64L << 20);
+    public long ReadMemoryBudgetBytes => Math.Max(64L << 20,
+        (long)((MemoryCacheMaxBytes - (128L << 20) - ReadCacheBudgetBytes / 4096 * 128) / 1.0625) / (64L << 20) * (64L << 20));
     public long MemoryCacheMaxBytes { get; init; } = 2L << 30;
     public bool EnableAdaptivePrefetch { get; init; }
     public int PrefetchMaxBytes { get; init; } = 1 << 20;
@@ -43,6 +49,9 @@ public sealed record HostConfig
             throw new ArgumentException("Prefetch limit must be 4 KiB aligned, from 64 KiB to 1 MiB.");
         if (EnableAdaptivePrefetch && !EnableMemoryCache) throw new ArgumentException("Adaptive prefetch requires bounded L1 cache.");
         if (!RiskAccepted) throw new ArgumentException("Set RiskAccepted=true after reviewing the whole-disk takeover behavior.");
+        if (EnableWriteBack && (CacheSizeBytes < (256L << 20) || MemoryCacheMaxBytes < (512L << 20) ||
+            MemoryCacheMaxBytes < ReadCacheBudgetBytes / 4096 * 128 + (256L << 20)))
+            throw new ArgumentException("Write-back needs sufficient total memory for bounded indexes and journal buffers.");
     }
 
     public static HostConfig Load(string path)

@@ -195,6 +195,43 @@ try{
  Assert (-not(SourceDisk).IsOffline) 'Crash recovery left source offline'
  Check-Data $changed
  Pass 'Forced process crash preserves recovery checkpoint; recover restores intact file'
+ # Switch the disposable device to durable write-back, then test actual NTFS/SMB, stop and crash restart.
+ $wbConfig=Get-Content $installedConfig -Raw | ConvertFrom-Json
+ $wbConfig | Add-Member -NotePropertyName EnableWriteBack -NotePropertyValue $true -Force
+ $wbConfig.CacheSizeBytes=512MB
+ $wbConfig.MemoryCacheMaxBytes=1GB
+ $wbConfig | ConvertTo-Json | Set-Content $installedConfig -Encoding utf8
+ Invoke-FlyDisk -arguments @('start')
+ $wbFile=$letter+':\writeback.bin'
+ $wbBytes=New-Object byte[] (16MB);[Random]::new(555).NextBytes($wbBytes)
+ $wbStream=[IO.FileStream]::new($wbFile,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,65536,[IO.FileOptions]::WriteThrough)
+ try{$wbStream.Write($wbBytes,0,$wbBytes.Length);$wbStream.Flush($true)}finally{$wbStream.Dispose()}
+ $wbHash=(Get-FileHash $wbFile).Hash
+ Assert ([DirectFileRead]::Hash($wbFile) -eq $wbHash) 'Write-back read-after-write mismatch'
+ New-SmbShare -Name $share -Path ($letter+':\') -FullAccess ([Security.Principal.WindowsIdentity]::GetCurrent().Name) | Out-Null
+ $wbUnc='\\localhost\'+$share+'\writeback-smb.bin'
+ [IO.File]::WriteAllBytes($wbUnc,$wbBytes)
+ Assert ((Get-FileHash $wbUnc).Hash -eq $wbHash) 'Write-back SMB mismatch'
+ Remove-Item -LiteralPath $wbUnc
+ Remove-SmbShare -Name $share -Force
+ Start-Sleep -Seconds 6
+ $wbState=Get-Content $statePath -Raw | ConvertFrom-Json
+ $wbState | ConvertTo-Json -Depth 12 | Set-Content (Join-Path $diagnostics 'writeback.json')
+ Assert ($wbState.Stats.WriteBack.AcknowledgedBytes -gt 0 -and -not $wbState.Stats.WriteBack.Error) 'WAL never acknowledged IO or faulted'
+ Invoke-FlyDisk -arguments @('stop')
+ Assert ((Get-FileHash $wbFile).Hash -eq $wbHash) 'Destaged native file mismatch'
+ Pass 'Durable WAL acknowledges real NTFS/SMB writes and drains intact source on stop'
+ Invoke-FlyDisk -arguments @('start')
+ $service=Get-CimInstance Win32_Service -Filter "Name='FlyDiskHeadless'"
+ $process=Get-Process -Id $service.ProcessId
+ Assert ($process.Path -eq $exe -and $process.Id -gt 0) 'Wrong process for disposable WAL crash'
+ Stop-Process -Id $process.Id -Force
+ Wait-ServiceState 'Stopped'
+ Invoke-FlyDisk -arguments @('start')
+ Assert ([DirectFileRead]::Hash($wbFile) -eq $wbHash) 'Automatic WAL recovery mismatch'
+ Invoke-FlyDisk -arguments @('stop')
+ Assert ((Get-FileHash $wbFile).Hash -eq $wbHash) 'Native data after WAL crash recovery mismatch'
+ Pass 'Write-back crash checkpoint automatically replays before exporting NTFS'
  Invoke-FlyDisk -arguments @('uninstall')
  $report | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $diagnostics 'results.json')
 }

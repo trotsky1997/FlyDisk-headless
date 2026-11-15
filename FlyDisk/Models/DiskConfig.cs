@@ -67,6 +67,8 @@ namespace FlyDisk.Models
     /// </summary>
     public class DiskConfig
     {
+        public bool EnableWriteBack { get; set; }
+        public long WriteJournalBytes { get; set; }
         /// <summary>浅拷贝（字符串 / 值类型安全；列表按引用共享）。会话副本与 L2 校验都用它。</summary>
         public DiskConfig Clone() => (DiskConfig)MemberwiseClone();
 

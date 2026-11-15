@@ -123,6 +123,8 @@ namespace FlyDisk.Engine
 
         /// <summary>缓存引擎（未启动时为 null；Inspector 要的统计走 <see cref="CreateSnapshot"/>）</summary>
         public CacheService? Cache => _cache;
+        private WriteBackJournal? _journal;
+        public object? WriteBackSnapshot => _journal?.Snapshot();
 
         /// <summary>
         /// 发起程序登录成功（iSCSI 连接已建立）时触发，参数为发起程序名与它所在的端点。
@@ -291,13 +293,22 @@ namespace FlyDisk.Engine
         /// <summary>两种形态**共同**的部分：建缓存 → 建 LUN 后端 → 起 target。它不碰块源的打开与关闭</summary>
         private EngineResult RunWithSource(IBlockSource source, BlockSourceInfo info)
         {
+            if (_config.EnableWriteBack)
+            {
+                if (source is not IDurableBlockSource durable) throw new IOException("Write-back requires a flush-capable local source.");
+                _journal = new WriteBackJournal(durable, _config.SsdCachePath, SsdCacheService.ComputeIdentity(info), _config.WriteJournalBytes, false);
+                _journal.Drain();
+                _journal.StartWorker();
+                source = _journal;
+            }
             _source = source;
             _sourceInfo = info;
 
             _cache = new CacheService(_config, info);
             _disk = new CachedPhysicalDisk(source, _cache, _config);
 
-            var target = new ISCSITarget(_config.TargetIqn, new List<Disk> { _disk });
+            var target = _journal == null ? new ISCSITarget(_config.TargetIqn, new List<Disk> { _disk })
+                : new ISCSITarget(_config.TargetIqn, new DurableScsiTarget(_disk, _journal));
             target.OnStandardInquiry += Target_OnStandardInquiry;
             target.OnUnitSerialNumberInquiry += Target_OnUnitSerialNumberInquiry;
             target.OnAuthorizationRequest += Target_OnAuthorizationRequest;
@@ -593,6 +604,14 @@ namespace FlyDisk.Engine
             //    下面几步（关句柄、写账本）之后才被执行。让它们撞上"目标已停止"的 IO 错误，
             //    比让它们碰到已释放的句柄（ObjectDisposedException 会把工作线程带走）安全得多。
             _disk?.Close();
+
+            // 回写排空失败时保留所有者和句柄，禁止沿用读缓存的“忽略释放错误”路径。
+            if (_journal != null)
+            {
+                while (_disk != null && !_disk.WaitForIdle(1000)) { }
+                _journal.Dispose();
+                _journal = null;
+            }
 
             CachedPhysicalDisk? disk = _disk;
             CacheService? cache = _cache;

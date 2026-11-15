@@ -142,7 +142,7 @@ namespace FlyDisk.Engine
     /// 线程前提：读写的调用方是库的 target 工作线程（<c>SCSITarget</c> 每个 target 一个后台线程串行执行命令），
     /// 本类因此共用一个文件指针、不做加锁——**若将来把 IO 并发化，这里必须改成按偏移读写**。
     /// </summary>
-    public sealed class PhysicalDiskHandle : IDisposable, IBlockSource
+    public sealed class PhysicalDiskHandle : IDisposable, IDurableBlockSource
     {
         /// <summary>单次 ReadFile/WriteFile 的字节上限（1MB）。与大库 PhysicalDisk 取同一口径，避开设备/驱动对单次搬运量的隐式上限</summary>
         private const int MaxTransferBytes = 1024 * 1024;
@@ -513,6 +513,16 @@ namespace FlyDisk.Engine
 
         /// <summary>按字节偏移写一段（调用方保证 [offset, offset+data.Length) 落在盘内且长度 &gt; 0）</summary>
         /// <exception cref="IOException">设备报错或写入的字节数不足</exception>
+        public void Flush()
+        {
+            var handle = _handle ?? throw new ObjectDisposedException(nameof(PhysicalDiskHandle));
+            if (!FlushFileBuffers(handle)) throw new IOException("Physical disk flush failed: " + LastErrorText());
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FlushFileBuffers(SafeFileHandle handle);
+
         public unsafe void Write(long byteOffset, byte[] data, int dataOffset, int count)
         {
             SafeFileHandle handle = _handle ?? throw new ObjectDisposedException(nameof(PhysicalDiskHandle));

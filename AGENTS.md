@@ -2,6 +2,11 @@
 
 ## Headless fork 范围补充
 
+- 用户已批准 SSD 持久化 WAL 回写及生产部署。`EnableWriteBack=true` 时启动/恢复先离线重放并 Flush HDD，再重建读缓存和 export；停服必须排空 WAL，失败禁止归还源盘。
+- `WriteBackJournal` 双检查点在复用日志空间前必须都落盘；已提交记录校验失败必须拒绝恢复。后台和前台通过 sourceGate 串行使用原始句柄。
+- 4GiB/64GiB 是回写模式总预算，含读写缓存与元数据预留；最多65536条待写记录，空间或记录上限满时背压30秒后报错，不覆盖未回写记录。
+- 每笔 WRITE（含 FUA）确认前刷 SSD 日志；`DurableScsiTarget` 实现 SYNCHRONIZE CACHE 10/16，不能恢复上游空 Flush 行为。
+
 本分支由用户明确要求 fork、实现无界面版本并支持 Windows 服务。该请求授权本分支修改、Git 操作、构建及隔离验证；下方上游“交用户编译 / 禁止 Git”流程不适用于这项已授权工作。不得因此推断可以接管用户的生产磁盘。
 
 - `Core/FlyDisk.Core.csproj` 链接编译共享引擎、模型、文本本地化，不依赖 WinForms。

@@ -47,19 +47,23 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
             WarningAccepted = true, Language = settings.Language,
             EnableAutoIscsiLogin = true, ListenAddress = "127.0.0.1", ListenPort = settings.ListenPort,
             TargetIqn = HostConfig.Iqn, SectorsPerBlock = 4096 / selected.BytesPerSector,
-            EnableMemoryCache = settings.EnableMemoryCache, MemoryCacheMaxBytes = settings.MemoryCacheMaxBytes,
+            EnableMemoryCache = settings.EnableMemoryCache, MemoryCacheMaxBytes = settings.EnableWriteBack ? settings.ReadMemoryBudgetBytes : settings.MemoryCacheMaxBytes,
+            EnableWriteBack = settings.EnableWriteBack, WriteJournalBytes = settings.JournalBudgetBytes,
             EnableAdaptivePrefetch = settings.EnableAdaptivePrefetch, PrefetchMaxBytes = settings.PrefetchMaxBytes, EnableSsdCache = true,
             SsdCachePath = SsdCacheService.GetDiskCacheDirectory(settings.CacheVolume, hash),
-            SsdCacheMaxBytes = settings.CacheSizeBytes
+            SsdCacheMaxBytes = settings.EnableWriteBack ? settings.ReadCacheBudgetBytes : settings.CacheSizeBytes
         };
         RejectReparsePoints(config.SsdCachePath);
+        if (!settings.EnableWriteBack && (File.Exists(WriteBackJournal.PathFor(config.SsdCachePath)) || File.Exists(WriteBackJournal.MarkerFor(config.SsdCachePath))))
+            throw new IOException("Persistent write-back state exists; disabling it cannot bypass recovery.");
         if (!recoveryOnly)
         {
             bool container = File.Exists(Path.Combine(config.SsdCachePath, "cache.dat"));
             bool index = File.Exists(Path.Combine(config.SsdCachePath, "index.bin"));
-            if (container != index) throw new IOException("Incomplete cache pair; refusing to discard cache automatically.");
+            if (container != index && !settings.EnableWriteBack) throw new IOException("Incomplete cache pair; refusing to discard cache automatically.");
             long footprint = (container ? new FileInfo(Path.Combine(config.SsdCachePath, "cache.dat")).Length : 0) +
-                (index ? new FileInfo(Path.Combine(config.SsdCachePath, "index.bin")).Length : 0);
+                (index ? new FileInfo(Path.Combine(config.SsdCachePath, "index.bin")).Length : 0) +
+                (File.Exists(WriteBackJournal.PathFor(config.SsdCachePath)) ? new FileInfo(WriteBackJournal.PathFor(config.SsdCachePath)).Length : 0);
             // 上游槽位计算在查询失败时回退配置值；服务预检必须严格失败，不能因此放行满盘。
             long budget = checked(new DriveInfo(settings.CacheVolume).AvailableFreeSpace + footprint - (1L << 30));
             if (budget < settings.CacheSizeBytes + 4096) throw new IOException("Insufficient cache volume free space.");
@@ -96,6 +100,8 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
             using var volumes = VolumeQuiesce.Lock(selected.DiskNumber);
             if (!PhysicalDiskHandle.TryOffline(selected.DiskNumber, out string offlineError)) throw new IOException(offlineError);
         }
+        ReplayWriteBack();
+        if (settings.EnableWriteBack) ResetCleanReadCache();
         if (SsdCacheService.LedgerExists(config))
         {
             using var verifier = new L2Verifier(config, selected.DiskNumber);
@@ -157,6 +163,8 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
             catch (Exception ex) { pending = ex; Thread.Sleep(1000); }
         }
         if (pending != null) throw new IOException("Cannot prove the iSCSI clone is gone.", pending);
+        ReplayWriteBack();
+        if (settings.EnableWriteBack) ResetCleanReadCache();
         if (File.Exists(Path.Combine(config.SsdCachePath, "cache.dat")) && !SsdCacheService.InvalidateLedger(config))
             throw new IOException("Could not invalidate L2 before returning the source disk to Windows.");
         if (!PhysicalDiskHandle.TryOnline(selected!.DiskNumber, out string error)) throw new IOException(error);
@@ -194,7 +202,32 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
         _ => throw new IOException("Storage provider returned an unknown bus type.")
     };
 
-    public object? Snapshot() => new { Cache = engine?.CreateSnapshot(), VerificationProgress = VerifyProgress, Verification, CacheRefresh };
+    private void ReplayWriteBack()
+    {
+        if (config == null || !settings.EnableWriteBack) return;
+        selected = Resolve();
+        if (selected.IsOnline)
+        {
+            // 不能在已挂载的旧文件系统上重放缓存元数据。
+            using var volumes = VolumeQuiesce.Lock(selected.DiskNumber);
+            if (!PhysicalDiskHandle.TryOffline(selected.DiskNumber, out string error)) throw new IOException(error);
+        }
+        using var raw = PhysicalDiskHandle.Open(selected.DiskNumber);
+        using var journal = new WriteBackJournal(raw, config.SsdCachePath,
+            SsdCacheService.ComputeIdentity(raw.ToBlockSourceInfo()), settings.JournalBudgetBytes, false);
+        journal.Drain();
+    }
+
+    private void ResetCleanReadCache()
+    {
+        // WAL 已完整重放并 Flush 后，HDD 才是权威副本。只删除可重建的读缓存，绝不删除 WAL。
+        foreach (string name in new[] { "cache.dat", "index.bin", "index.tmp" })
+            File.Delete(Path.Combine(config!.SsdCachePath, name));
+    }
+
+    public object? Snapshot() => new { Cache = engine?.CreateSnapshot(), WriteBack = engine?.WriteBackSnapshot,
+        TotalMemoryBudgetBytes = settings.MemoryCacheMaxBytes, TotalSsdBudgetBytes = settings.CacheSizeBytes,
+        VerificationProgress = VerifyProgress, Verification, CacheRefresh };
 }
 
 internal static class External

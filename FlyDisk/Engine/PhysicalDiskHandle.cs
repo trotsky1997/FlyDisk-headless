@@ -84,6 +84,9 @@ namespace FlyDisk.Engine
         /// <summary>序列号（VPD 页 0x80 的上报来源）</summary>
         public string SerialNumber { get; set; } = string.Empty;
 
+        /// <summary>仅用于没有文本序列号的 FileBackedVirtual：VPD83 设备关联的稳定 NAA/EUI。</summary>
+        public string VirtualDeviceId { get; set; } = string.Empty;
+
         /// <summary>是否报告"有搜寻惩罚"（机械盘特征；由 IOCTL_STORAGE_QUERY_PROPERTY 的 SeekPenalty 属性给出）</summary>
         public bool IncursSeekPenalty { get; set; }
 
@@ -848,6 +851,11 @@ namespace FlyDisk.Engine
                 info.ProductId = ReadDescriptorString(descriptor, descriptor.ProductIdOffset);
                 info.ProductRevision = ReadDescriptorString(descriptor, descriptor.ProductRevisionOffset);
                 info.SerialNumber = ReadDescriptorString(descriptor, descriptor.SerialNumberOffset);
+                if (info.BusType == 15 && info.SerialNumber.Length == 0)
+                {
+                    info.VirtualDeviceId = QueryVirtualDeviceId(handle);
+                    if (info.VirtualDeviceId.Length > 0) info.SerialNumber = "VPD83-" + info.VirtualDeviceId;
+                }
                 // 设备类型（可移动 / 热插拔）的判定与日志在 Probe 里统一做：那里还要查 IOCTL_STORAGE_GET_HOTPLUG_INFO
             }
             catch (Exception ex)
@@ -875,6 +883,23 @@ namespace FlyDisk.Engine
             while (end < raw.Length && raw[end] != 0) end++;
             if (end == offset) return string.Empty;
             return Encoding.Latin1.GetString(raw, offset, end - offset).Trim();
+        }
+
+        private static string QueryVirtualDeviceId(SafeFileHandle handle)
+        {
+            IntPtr input = Marshal.AllocHGlobal(12);
+            IntPtr output = Marshal.AllocHGlobal(65536);
+            try
+            {
+                Marshal.Copy(new byte[12], 0, input, 12);
+                Marshal.WriteInt32(input, 2); // StorageDeviceIdProperty; PropertyStandardQuery=0
+                if (!PhysicalDiskControl.DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY,
+                    input, 12, output, 65536, out uint returned, IntPtr.Zero) || returned > 65536) return string.Empty;
+                byte[] bytes = new byte[returned];
+                Marshal.Copy(output, bytes, 0, bytes.Length);
+                return StorageDeviceIdentity.ReadBinaryDeviceId(bytes);
+            }
+            finally { Marshal.FreeHGlobal(input); Marshal.FreeHGlobal(output); }
         }
 
         /// <summary>

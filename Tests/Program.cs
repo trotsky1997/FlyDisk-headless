@@ -25,9 +25,26 @@ Test("invalid config never accepted", () => {
         Valid() with {ListenPort=0}, Valid() with {SchemaVersion=2}}) Throws(bad.Validate);
     Valid().Validate();
 });
+Test("VHD VPD83 identity parser rejects malformed and port-scoped identifiers", () => {
+    // Construct a standards-sized single NAA descriptor independently of the captured sample.
+    byte[] descriptor=new byte[44];BitConverter.GetBytes(16).CopyTo(descriptor,0);BitConverter.GetBytes(44).CopyTo(descriptor,4);
+    BitConverter.GetBytes(1).CopyTo(descriptor,8);BitConverter.GetBytes(1).CopyTo(descriptor,12);BitConverter.GetBytes(3).CopyTo(descriptor,16);
+    BitConverter.GetBytes((ushort)16).CopyTo(descriptor,20);Convert.FromHexString("6002248070BE9C38CE6C6EDD5DB7A9A2").CopyTo(descriptor,28);
+    Check(StorageDeviceIdentity.ReadBinaryDeviceId(descriptor)=="6002248070BE9C38CE6C6EDD5DB7A9A2","NAA not recognized");
+    Check(StorageDeviceIdentity.ReadBinaryDeviceId(descriptor.AsSpan(0,43))=="","Truncated descriptor accepted");
+    descriptor[24]=1;Check(StorageDeviceIdentity.ReadBinaryDeviceId(descriptor)=="","Port identity accepted");
+    descriptor[24]=0;descriptor[20]=255;Check(StorageDeviceIdentity.ReadBinaryDeviceId(descriptor)=="","Oversized entry accepted");
+});
 Test("preflight failure never takes disk offline or restores unrelated disk", () => {
     var b = new FakeBackend { Fail = "preflight" }; var host = new Lifecycle(b, (_,_,_)=>{});
     Throws(()=>host.Start(default)); Check(b.Calls.SequenceEqual(["preflight"]), "Unexpected disk mutation");
+});
+Test("storage-provider bus types support both Windows JSON representations", () => {
+    using var values=JsonDocument.Parse("[9,15,\"iSCSI\",\"File Backed Virtual\",null]");
+    var list=values.RootElement.EnumerateArray().ToArray();
+    Check(NativeBackend.IsIscsiBus(list[0]) && NativeBackend.IsIscsiBus(list[2]),"iSCSI not recognized");
+    Check(!NativeBackend.IsIscsiBus(list[1]) && !NativeBackend.IsIscsiBus(list[3]),"Virtual source misidentified");
+    Throws(()=>NativeBackend.IsIscsiBus(list[4]));
 });
 Test("journal failure precedes first disk mutation", () => {
     var b = new FakeBackend(); var host = new Lifecycle(b, (p,_,_)=> {if(p=="preparing") throw new IOException();});

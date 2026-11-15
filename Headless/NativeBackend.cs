@@ -131,7 +131,7 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
         Exception? pending = null;
         for (int attempt = 0; attempt < 10; attempt++)
         {
-            try { AssertNoExport(); selected = Resolve(); pending = null; break; }
+            try { selected = Resolve(); AssertNoExport(); pending = null; break; }
             catch (Exception ex) { pending = ex; Thread.Sleep(1000); }
         }
         if (pending != null) throw new IOException("Cannot prove the iSCSI clone is gone.", pending);
@@ -148,19 +148,29 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
         string script = "$ErrorActionPreference='Stop'; $service=Get-Service MSiSCSI; $s=@(); " +
             "if($service.Status -eq 'Running'){$s=@(Get-IscsiSession | Where-Object TargetNodeAddress -eq '" + HostConfig.Iqn + "')} " +
             "elseif($service.Status -ne 'Stopped'){throw 'MSiSCSI is transitioning'}; " +
-            "[pscustomobject]@{Sessions=$s.Count;Disks=@(Get-Disk | Select-Object Number,SerialNumber,Size,BusType)} | ConvertTo-Json -Depth 4 -Compress";
+            "[pscustomobject]@{Sessions=$s.Count;Disks=@(Get-Disk | Select-Object Number,SerialNumber,UniqueId,Size,BusType)} | ConvertTo-Json -Depth 4 -Compress";
         string output = External.Run("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
             Convert.ToBase64String(Encoding.Unicode.GetBytes(script))]);
         using var json = JsonDocument.Parse(output);
         if (json.RootElement.GetProperty("Sessions").GetInt32() != 0) throw new IOException("iSCSI sessions remain.");
         string serial = selected!.SerialNumber.Trim();
         var matching = json.RootElement.GetProperty("Disks").EnumerateArray().Where(d =>
-            (d.GetProperty("SerialNumber").GetString() ?? "").Trim() == serial &&
+            (selected.VirtualDeviceId.Length > 0
+                ? string.Equals((d.GetProperty("UniqueId").GetString() ?? "").Trim(), selected.VirtualDeviceId, StringComparison.OrdinalIgnoreCase) ||
+                  (d.GetProperty("SerialNumber").GetString() ?? "").Trim() == serial
+                : (d.GetProperty("SerialNumber").GetString() ?? "").Trim() == serial) &&
             d.GetProperty("Size").GetInt64() == settings.ExpectedSizeBytes).ToArray();
         if (matching.Length != 1 || matching[0].GetProperty("Number").GetInt32() != selected.DiskNumber ||
-            matching[0].GetProperty("BusType").GetInt32() == 9)
+            IsIscsiBus(matching[0].GetProperty("BusType")))
             throw new IOException("Source/clone disk enumeration is ambiguous.");
     }
+
+    public static bool IsIscsiBus(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.Number => value.GetInt32() == 9,
+        JsonValueKind.String => string.Equals(value.GetString(), "iSCSI", StringComparison.OrdinalIgnoreCase),
+        _ => throw new IOException("Storage provider returned an unknown bus type.")
+    };
 
     public object? Snapshot() => new { Cache = engine?.CreateSnapshot(), Verification = VerifyProgress };
 }

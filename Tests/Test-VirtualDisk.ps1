@@ -71,6 +71,13 @@ try{
  $inventory=& $exe list | ConvertFrom-Json
  $selected=@($inventory | Where-Object {$_.Disk.DiskNumber -eq $sourceNumber})
  Assert ($selected.Count -eq 1 -and $selected[0].Identity -match '\|.+$') 'VHD lacks a stable identity; refusing to bypass guard'
+ $originalIdentity=$selected[0].Identity
+ Dismount-DiskImage -ImagePath $vhd | Out-Null
+ Mount-DiskImage -ImagePath $vhd | Out-Null
+ $reattached=SourceDisk
+ $secondInventory=& $exe list | ConvertFrom-Json
+ Assert ((@($secondInventory | Where-Object {$_.Disk.DiskNumber -eq $reattached.Number}))[0].Identity -eq $originalIdentity) 'Virtual disk identity changed after reattachment'
+ Pass 'VPD83 identity remains stable across VHD detachment/attachment'
  $selected | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $diagnostics 'source.json')
  $config=Join-Path $root 'config.json'
  @{SchemaVersion=1;DiskIdentity=$selected[0].Identity;ExpectedSizeBytes=$selected[0].Disk.SizeBytes;CacheVolume='C:';CacheSizeBytes=64MB;EnableMemoryCache=$false;RiskAccepted=$true;Language='en-US'} | ConvertTo-Json | Set-Content $config -Encoding utf8

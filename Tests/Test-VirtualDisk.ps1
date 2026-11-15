@@ -128,12 +128,27 @@ try{
  $bytes[0]=$bytes[0] -bxor 255
  [IO.File]::WriteAllBytes($file,$bytes)
  $changed=(Get-FileHash $file).Hash
+ $installedConfig=Join-Path $env:ProgramData 'FlyDiskHeadless\config.json'
+ $strictConfig=Get-Content $installedConfig -Raw | ConvertFrom-Json
+ $strictConfig.RefreshChangedBlocks=$false
+ $strictConfig | ConvertTo-Json | Set-Content $installedConfig -Encoding utf8
  & $exe start | Write-Host
  Assert ($LASTEXITCODE -ne 0) 'Stale cache unexpectedly accepted'
  Wait-ServiceState 'Stopped'
  Assert (-not(SourceDisk).IsOffline) 'Verification failure stranded the disk'
  Check-Data $changed
  Pass 'Offline file modification rejects stale cache and restores source'
+ $strictConfig.RefreshChangedBlocks=$true
+ $strictConfig | ConvertTo-Json | Set-Content $installedConfig -Encoding utf8
+ Invoke-FlyDisk -arguments @('start')
+ Check-Data $changed
+ Start-Sleep -Seconds 6
+ $refreshed=Get-Content $statePath -Raw | ConvertFrom-Json
+ Assert ($refreshed.Stats.CacheRefresh.RepairedBlocks -gt 0) 'Changed cache blocks were not refreshed'
+ Assert ([DirectFileRead]::Hash($file) -eq $changed) 'Refreshed cache returned stale file contents'
+ Invoke-FlyDisk -arguments @('stop')
+ Check-Data $changed
+ Pass 'Full verification refreshes changed cache blocks without modifying source data'
  # Clear ONLY the cache directory created by this isolated test, never an existing cache.
  $created=@(Get-ChildItem 'C:\FlyDisk.Cache' -Directory | Where-Object {$_.FullName -notin $cacheBefore})
  Assert ($created.Count -eq 1) 'Cannot identify disposable cache directory'

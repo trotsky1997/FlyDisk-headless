@@ -5,6 +5,7 @@
   "CacheVolume": "C:",
   "CacheSizeBytes": 34359738368,
   "EnableMemoryCache": false,
+  "RefreshChangedBlocks": true,
   "RiskAccepted": false,
   "Language": "zh-CN",
   "ListenPort": 3260

@@ -86,6 +86,14 @@ Test("verification rejects every incomplete/error outcome", () => {
         Check(!NativeBackend.VerificationPassed(bad), "False verification success");
     using var verifier=new L2Verifier(new DiskConfig(),-1); Throws(verifier.ConfirmLedger);
 });
+Test("automatic refresh requires complete verified differences and no read/structure errors", () => {
+    var result=new L2VerifyResult{PlannedBlocks=3,ScannedBlocks=3,MatchedBlocks=2,MismatchedBlocks=1};
+    Check(NativeBackend.CanRefreshChangedBlocks(result),"Complete changed blocks not refreshable");
+    result.ReadFailedBlocks=1;Check(!NativeBackend.CanRefreshChangedBlocks(result),"Read error accepted");
+    result.ReadFailedBlocks=0;result.ScannedBlocks=2;Check(!NativeBackend.CanRefreshChangedBlocks(result),"Incomplete scan accepted");
+    result.ScannedBlocks=3;result.DuplicateBlocks=1;Check(!NativeBackend.CanRefreshChangedBlocks(result),"Duplicate mapping accepted");
+    result.DuplicateBlocks=0;result.Cancelled=true;Check(!NativeBackend.CanRefreshChangedBlocks(result),"Cancelled scan accepted");
+});
 
 string root=Path.Combine(Path.GetTempPath(), "flydisk-headless-tests-"+Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);

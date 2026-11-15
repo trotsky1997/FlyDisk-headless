@@ -14,6 +14,7 @@ public sealed record HostConfig
     public string CacheVolume { get; init; } = "";
     public long CacheSizeBytes { get; init; } = 32L << 30;
     public bool EnableMemoryCache { get; init; }
+    public bool RefreshChangedBlocks { get; init; } = true;
     public bool RiskAccepted { get; init; }
     public string Language { get; init; } = "zh-CN";
     public int ListenPort { get; init; } = 3260;

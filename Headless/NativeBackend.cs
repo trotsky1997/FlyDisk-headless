@@ -16,6 +16,8 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
     private DiskConfig? config;
     private TargetService? engine;
     public L2VerifyProgress? VerifyProgress { get; private set; }
+    public L2VerifyResult? Verification { get; private set; }
+    public L2RepairResult? CacheRefresh { get; private set; }
 
     private PhysicalDiskInfo Resolve()
     {
@@ -93,7 +95,17 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
             using var verifier = new L2Verifier(config, selected.DiskNumber);
             verifier.Open();
             var result = verifier.Verify(p => VerifyProgress = p, cancellationToken);
-            if (!VerificationPassed(result)) throw new IOException("L2 verification failed: " + JsonSerializer.Serialize(result, StateStore.Json));
+            Verification = result;
+            if (!VerificationPassed(result))
+            {
+                if (!settings.RefreshChangedBlocks || !CanRefreshChangedBlocks(result))
+                    throw new IOException("L2 verification failed: " + JsonSerializer.Serialize(result, StateStore.Json));
+                // 正常还盘后 NTFS 会更新元数据；完整比对后仅刷新 L2，源盘句柄始终只读。
+                var refresh = verifier.Repair(p => VerifyProgress = p, cancellationToken);
+                CacheRefresh = refresh;
+                if (refresh.Cancelled || refresh.ReadFailedBlocks != 0 || refresh.WriteFailedBlocks != 0 || refresh.RepairedBlocks != result.MismatchedBlocks)
+                    throw new IOException("L2 refresh failed: " + JsonSerializer.Serialize(refresh, StateStore.Json));
+            }
             cancellationToken.ThrowIfCancellationRequested();
             verifier.ConfirmLedger();
         }
@@ -106,6 +118,10 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
     }
 
     public static bool VerificationPassed(L2VerifyResult result) => result.IsClean;
+
+    public static bool CanRefreshChangedBlocks(L2VerifyResult r) => !r.Cancelled && !r.Aborted &&
+        r.MismatchedBlocks > 0 && r.ReadFailedBlocks == 0 && r.OutOfRangeBlocks == 0 && r.DuplicateBlocks == 0 &&
+        r.ScannedBlocks == r.PlannedBlocks && r.MatchedBlocks + r.MismatchedBlocks == r.PlannedBlocks;
 
     public void Start()
     {
@@ -172,7 +188,7 @@ public sealed class NativeBackend(HostConfig settings, bool recoveryOnly = false
         _ => throw new IOException("Storage provider returned an unknown bus type.")
     };
 
-    public object? Snapshot() => new { Cache = engine?.CreateSnapshot(), Verification = VerifyProgress };
+    public object? Snapshot() => new { Cache = engine?.CreateSnapshot(), VerificationProgress = VerifyProgress, Verification, CacheRefresh };
 }
 
 internal static class External

@@ -30,7 +30,7 @@ internal sealed class HostProcess(HostConfig config) : IHeadlessHost, IDisposabl
             lifecycle = new Lifecycle(backend, (phase, error, recovery) => store.Write(phase, error, recovery));
             timer = new Timer(_ =>
             {
-                try { store.Heartbeat(backend.Snapshot, () => new { Verification = backend.VerifyProgress }); }
+                try { store.Heartbeat(backend.Snapshot, () => new { VerificationProgress = backend.VerifyProgress, backend.Verification, backend.CacheRefresh }); }
                 catch (Exception ex) { FlyDisk.Engine.LogService.DebugFile("headless heartbeat: " + ex); }
             }, null, 5000, 5000);
             lifecycle.Start(cancellation.Token);

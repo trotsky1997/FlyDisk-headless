@@ -4,6 +4,9 @@
 
 - WAL uses explicit `Flush(true)` barriers instead of per-write `WriteThrough`: payload/header precede the first barrier; each redundant checkpoint retains its own barrier. Do not acknowledge earlier or merge the two reclaim checkpoint barriers. Fully WAL-covered reads overlay journal records without acquiring the HDD source gate; reads with gaps still use the serialized source handle.
 
+- Headless SSD capacity is an upper limit: both read cache and WAL use NTFS sparse files; never demand free space equal to the configured ceiling. L1 allocates 64MiB slabs only on demand. Sparse WAL holes may be released only outside the validated/checkpointed live interval, after HDD Flush and both reclaim checkpoints; corruption still fails closed.
+- `configure-recovery` installs bounded SCM crash actions and a SYSTEM supervisor task. `supervise` checks durable host state, configuration identity and real export health; a clean manual stop is respected. Normal Stop/Restore/WAL validation remain mandatory. Never kill in-flight IO or force an unproven source online. Recovery failures/circuit-open native fallback remain explicit in supervisor.json.
+
 - 用户已批准 SSD 持久化 WAL 回写及生产部署。`EnableWriteBack=true` 时启动/恢复先离线重放并 Flush HDD，再重建读缓存和 export；停服必须排空 WAL，失败禁止归还源盘。
 - `WriteBackJournal` 双检查点在复用日志空间前必须都落盘；已提交记录校验失败必须拒绝恢复。后台和前台通过 sourceGate 串行使用原始句柄。
 - 4GiB/64GiB 是回写模式总预算，含读写缓存与元数据预留；最多65536条待写记录，空间或记录上限满时背压30秒后报错，不覆盖未回写记录。

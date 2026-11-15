@@ -296,7 +296,7 @@ namespace FlyDisk.Engine
             if (_config.EnableWriteBack)
             {
                 if (source is not IDurableBlockSource durable) throw new IOException("Write-back requires a flush-capable local source.");
-                _journal = new WriteBackJournal(durable, _config.SsdCachePath, SsdCacheService.ComputeIdentity(info), _config.WriteJournalBytes, false);
+                _journal = new WriteBackJournal(durable, _config.SsdCachePath, SsdCacheService.ComputeIdentity(info), _config.WriteJournalBytes, false, sparse: _config.SsdSparseAllocation);
                 _journal.Drain();
                 _journal.StartWorker();
                 source = _journal;
@@ -822,7 +822,8 @@ namespace FlyDisk.Engine
                 ReadSectorsTotal = _disk?.ReadSectorsTotal ?? 0,
                 ReadFullHitCommandsTotal = _disk?.ReadFullHitCommandsTotal ?? 0,
                 WriteCommandsTotal = _disk?.WriteCommandsTotal ?? 0,
-                WriteSectorsTotal = _disk?.WriteSectorsTotal ?? 0
+                WriteSectorsTotal = _disk?.WriteSectorsTotal ?? 0,
+                ActiveIoAgeMilliseconds = ActiveIoAgeMilliseconds
             };
 
             _cache?.FillSnapshot(stats);
@@ -838,6 +839,7 @@ namespace FlyDisk.Engine
             TraceSourceDiskAttributes();
             return stats;
         }
+        public long ActiveIoAgeMilliseconds => _disk?.ActiveIoAgeMilliseconds ?? 0;
 
         #region 源盘属性复核（诊断）
 

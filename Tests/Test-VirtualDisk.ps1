@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Real NTFS -> iSCSI -> FlyDisk -> disposable VHDX integration. CI ONLY.
-param([Parameter(Mandatory)][string]$Package,[switch]$AllowLocalDisposableVhd)
+param([Parameter(Mandatory)][string]$Package,[string]$ProtocolFixture,[switch]$AllowLocalDisposableVhd)
 $ErrorActionPreference='Stop'
 if($env:GITHUB_ACTIONS -ne 'true' -and -not $AllowLocalDisposableVhd){throw 'Explicit -AllowLocalDisposableVhd is required outside disposable CI.'}
 $tempParent=if($env:GITHUB_ACTIONS -eq 'true'){$env:RUNNER_TEMP}else{$env:TEMP}
@@ -225,10 +225,20 @@ try{
  $service=Get-CimInstance Win32_Service -Filter "Name='FlyDiskHeadless'"
  $process=Get-Process -Id $service.ProcessId
  Assert ($process.Path -eq $exe -and $process.Id -gt 0) 'Wrong process for disposable WAL crash'
+ Invoke-FlyDisk -arguments @('configure-recovery')
+ if(-not $ProtocolFixture){throw 'Protocol fixture is required for reset/crash recovery acceptance'}
+ & $ProtocolFixture --tmf-probe
+ Assert ($LASTEXITCODE -eq 0) '0x02 reset protocol probe failed'
+ New-SmbShare -Name $share -Path ($letter+':\') -FullAccess ([Security.Principal.WindowsIdentity]::GetCurrent().Name) | Out-Null
+ $crashUnc='\\localhost\'+$share+'\writeback.bin'
  Stop-Process -Id $process.Id -Force
  Wait-ServiceState 'Stopped'
- Invoke-FlyDisk -arguments @('start')
+ $deadline=(Get-Date).AddSeconds(100)
+ do{Start-Sleep 2;$auto=Get-CimInstance Win32_Service -Filter "Name='FlyDiskHeadless'";if((Get-Date) -gt $deadline){throw 'Automatic reset/crash service recovery timed out'}}while($auto.State -ne 'Running' -or $auto.ProcessId -eq $process.Id -or -not(Test-Path $wbFile))
  Assert ([DirectFileRead]::Hash($wbFile) -eq $wbHash) 'Automatic WAL recovery mismatch'
+ Assert ((Get-FileHash $crashUnc).Hash -eq $wbHash) 'SMB share did not recover after reset/crash'
+ Remove-SmbShare -Name $share -Force
+ Pass '0x02 followed by owned process crash self-heals without manual start, preserving NTFS and SMB hashes'
  Invoke-FlyDisk -arguments @('stop')
  Assert ((Get-FileHash $wbFile).Hash -eq $wbHash) 'Native data after WAL crash recovery mismatch'
  Pass 'Write-back crash checkpoint automatically replays before exporting NTFS'

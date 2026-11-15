@@ -27,6 +27,7 @@ public sealed class WriteBackJournal : IDurableBlockSource
     readonly FileStream file;
     readonly long identity, capacity;
     readonly string directory;
+    readonly bool sparse;
     readonly LinkedList<Entry> entries = new();
     readonly int waitMilliseconds;
     Thread? worker;
@@ -43,9 +44,9 @@ public sealed class WriteBackJournal : IDurableBlockSource
     public static string MarkerFor(string directory) => Path.Combine(directory, "writeback.required");
 
     public WriteBackJournal(IDurableBlockSource source, string directory, long identity, long budgetBytes,
-        bool startWorker = true, int waitMilliseconds = 30000)
+        bool startWorker = true, int waitMilliseconds = 30000, bool sparse = false)
     {
-        this.source = source; this.identity = identity; this.waitMilliseconds = waitMilliseconds; this.directory = directory;
+        this.source = source; this.identity = identity; this.waitMilliseconds = waitMilliseconds; this.directory = directory; this.sparse = sparse;
         capacity = (budgetBytes - Start) / Page * Page;
         if (capacity < 4 * Page || budgetBytes % Page != 0) throw new ArgumentException("Invalid WAL budget.");
         Directory.CreateDirectory(directory);
@@ -61,8 +62,10 @@ public sealed class WriteBackJournal : IDurableBlockSource
             FileShare.None, 1, FileOptions.RandomAccess);
         try
         {
+            if (sparse) SparseFile.Enable(file);
             if (existing) Load();
             else { file.SetLength(Start); Checkpoint(); }
+            if (sparse) ReleaseFreeExtents();
             if (!File.Exists(marker))
             {
                 using var m = new FileStream(marker, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.WriteThrough);
@@ -74,6 +77,20 @@ public sealed class WriteBackJournal : IDurableBlockSource
     }
 
     static long Align(long n) => checked((n + Page - 1) / Page * Page);
+    // Only free space outside the checkpointed live interval. In particular,
+    // recovery must validate all committed records before calling this method.
+    void ReleaseFreeExtents()
+    {
+        if (head == tail) { SparseFile.Release(file, Start, file.Length); return; }
+        if (head - tail == capacity) return;
+        long first = tail % capacity, last = head % capacity;
+        if (first < last)
+        {
+            SparseFile.Release(file, Start, Start + first);
+            SparseFile.Release(file, Start + last, Start + capacity);
+        }
+        else SparseFile.Release(file, Start + last, Start + first);
+    }
     void At(long at, byte[] data) { file.Position = at; file.Write(data); }
     byte[] ReadAt(long at, int count) { byte[] b = new byte[count]; file.Position = at; file.ReadExactly(b); return b; }
     static void Put(byte[] b, int at, long value) => BitConverter.GetBytes(value).CopyTo(b, at);
@@ -322,6 +339,10 @@ public sealed class WriteBackJournal : IDurableBlockSource
                 for (int n = 0; n < batch.Count; n++) following = following!.Next;
                 tail = following?.Value.Position ?? head;
                 Checkpoint(); // 必须先持久化回收位置，再允许生产者复用空间。
+                // Include the entire free interval so partial filesystem
+                // allocation units from adjacent retired batches are reclaimed
+                // once the full unit is free. Never touch the live interval.
+                if (sparse) ReleaseFreeExtents();
                 foreach (var item in batch) { entries.RemoveFirst(); dirtyBytes -= item.Entry.Count; writtenBytes += item.Entry.Count; replayed++; }
                 Monitor.PulseAll(gate);
             }

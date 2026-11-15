@@ -230,8 +230,10 @@ namespace FlyDisk.Engine
         /// <exception cref="L2LedgerUnusableException">
         /// 账本存在但不可用：不完整 / 不属于本盘 / 盘原本联机 / 上次未正常关服
         /// </exception>
+        private readonly bool _sparseAllocation;
         public SsdCacheService(DiskConfig config, BlockSourceInfo source)
         {
+            _sparseAllocation = config.SsdSparseAllocation;
             _dir = Path.GetFullPath(config.SsdCachePath).TrimEnd('\\');
             _deviceIdentity = ComputeDeviceIdentity(source.Model, source.SerialNumber, source.SizeBytes, source.BytesPerSector);
 
@@ -243,7 +245,7 @@ namespace FlyDisk.Engine
 
             try
             {
-                _slotCount = ComputeSlotCount(_dir, config.SsdCacheMaxBytes);
+                _slotCount = config.SsdSparseAllocation ? ConfiguredSlotCountFor(config) : ComputeSlotCount(_dir, config.SsdCacheMaxBytes);
 
                 double ghostFraction = 0; // Exact LRU admits demand reads directly; no ghost allocation.
                 if (Math.Abs(config.SsdCacheGhostFraction - ghostFraction) > 1e-9)
@@ -282,6 +284,7 @@ namespace FlyDisk.Engine
 
                 _container = new FileStream(containerPath, FileMode.OpenOrCreate,
                     FileAccess.ReadWrite, FileShare.None, bufferSize: 1, FileOptions.None);
+                if (config.SsdSparseAllocation) SparseFile.Enable(_container);
                 _containerBytes = _container.Length;
 
                 // 容器**按需、按 Slab 整块增长**（见 docs/L2容器按需增长与容量缩放_设计.md §4 D2）：
@@ -458,6 +461,7 @@ namespace FlyDisk.Engine
         public static int ComputeSlotCountFor(DiskConfig config)
         {
             if (string.IsNullOrWhiteSpace(config.SsdCachePath)) return 0;
+            if (config.SsdSparseAllocation) return ConfiguredSlotCountFor(config);
             try
             {
                 return ComputeSlotCount(Path.GetFullPath(config.SsdCachePath).TrimEnd('\\'), config.SsdCacheMaxBytes);
@@ -1334,7 +1338,7 @@ namespace FlyDisk.Engine
                 _container!.SetLength(needed);
                 _containerBytes = needed;
 
-                if (!_sfvdUnavailable && !TrySetFileValidData(_container!, needed))
+                if (!_sparseAllocation && !_sfvdUnavailable && !TrySetFileValidData(_container!, needed))
                 {
                     _sfvdUnavailable = true;
                     LogService.DebugFile(

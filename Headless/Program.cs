@@ -20,7 +20,7 @@ internal static class Program
             {
                 Console.WriteLine("FlyDisk Headless (Windows, whole-disk read cache / write-through)\n" +
                     "  list\n  sample-config\n  preflight [--config PATH]\n  run [--config PATH]\n" +
-                    "  install --config PATH [--automatic]\n  start\n  stop\n  status\n" +
+                      "  install --config PATH [--automatic]\n  start\n  stop\n  status\n  configure-recovery\n  supervise\n" +
                     "  recover [--config PATH]\n  uninstall\n" +
                     "Install defaults to manual start. --automatic selects delayed automatic start.\n" +
                     "stop restores the original disk after safely detaching iSCSI; recover handles abandoned offline disks.\n" +
@@ -54,7 +54,9 @@ internal static class Program
                 case "install": ServiceManager.Install(configPath, automatic); Print(new { Installed = true, Started = false, Automatic = automatic }); break;
                 case "uninstall": ServiceManager.Uninstall(); Print(new { Uninstalled = true }); break;
                 case "start": ServiceManager.Start(); Print(new { Service = ServiceManager.GetStatus() }); break;
-                case "stop": ServiceManager.Stop(); Print(new { Service = ServiceManager.GetStatus() }); break;
+                  case "stop": RecoverySupervisor.CancelIntent(); ServiceManager.Stop(); Print(new { Service = ServiceManager.GetStatus() }); break;
+                  case "supervise": Print(RecoverySupervisor.Run()); break;
+                  case "configure-recovery": ServiceManager.ConfigureRecovery(); Print(new { RecoveryConfigured = true }); break;
                 case "preflight":
                     using (var owner = HostProcess.AcquireOwnership())
                     { new NativeBackend(HostConfig.Load(configPath)).Preflight(); Print(new { PreflightPassed = true, DiskTakenOffline = false }); }

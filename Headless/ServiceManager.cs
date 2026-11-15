@@ -63,6 +63,20 @@ internal static class ServiceManager
         catch (InvalidOperationException ex) when (ex.InnerException is System.ComponentModel.Win32Exception { NativeErrorCode: 1060 }) { return "not-installed"; }
     }
 
+    internal static void ConfigureRecovery()
+    {
+        RequireAdministrator();
+        string installed=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),Name,"FlyDisk.Headless.exe");
+        if(!File.Exists(installed))throw new IOException("Install the protected service package before enabling recovery.");
+        ServiceRecovery.Configure(Name);
+        string escaped=installed.Replace("'","''");
+        string script="$ErrorActionPreference='Stop'; $action=New-ScheduledTaskAction -Execute '"+escaped+"' -Argument 'supervise'; "+
+            "$trigger=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1); "+
+            "$settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -StartWhenAvailable; "+
+            "Register-ScheduledTask -TaskName 'FlyDiskHeadless-Recovery' -Action $action -Trigger $trigger -Settings $settings -User SYSTEM -RunLevel Highest -Force | Out-Null";
+        External.Run("powershell.exe",["-NoProfile","-NonInteractive","-EncodedCommand",Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script))]);
+    }
+
     internal static void Start()
     {
         using var controller = new ServiceController(Name);
@@ -103,6 +117,7 @@ internal static class ServiceManager
         if (File.Exists(stateFile) && JsonSerializer.Deserialize<HostState>(File.ReadAllText(stateFile), StateStore.Json) is { RecoveryRequired: true })
             throw new IOException("Run recover successfully before uninstalling. The disk may still be offline.");
         External.Run("sc.exe", ["delete", Name]);
+        External.Run("powershell.exe",["-NoProfile","-NonInteractive","-Command","$t=Get-ScheduledTask -TaskName 'FlyDiskHeadless-Recovery' -ErrorAction SilentlyContinue; if($t){$t | Unregister-ScheduledTask -Confirm:$false -ErrorAction Stop}; exit 0"]);
         // 保留配置与缓存，卸载绝不递归删除磁盘内容。
     }
 }

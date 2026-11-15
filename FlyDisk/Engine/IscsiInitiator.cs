@@ -17,6 +17,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.ServiceProcess;
 using System.Threading;
@@ -440,7 +442,9 @@ namespace FlyDisk.Engine
         }
 
         /// <summary>枚举活动会话（返回 会话 id + 目标名）。失败时返回空表</summary>
-        private static List<(ISCSI_UNIQUE_SESSION_ID Id, string Target)> EnumerateSessions()
+        public static bool HasConnectedSession(string iqn) => EnumerateSessions(true, true).Any(s => IsKnownTargetName(s.Target, iqn));
+
+        private static List<(ISCSI_UNIQUE_SESSION_ID Id, string Target)> EnumerateSessions(bool connectedOnly = false, bool strict = false)
         {
             var result = new List<(ISCSI_UNIQUE_SESSION_ID, string)>();
 
@@ -451,6 +455,7 @@ namespace FlyDisk.Engine
             if (rc != ERROR_INSUFFICIENT_BUFFER || bufferSize == 0)
             {
                 LogService.DebugFile($"iSCSI initiator: session list probe rc=0x{rc:X8}");
+                if (strict) throw new IOException($"Cannot query iSCSI sessions: 0x{rc:X8}");
                 return result;
             }
 
@@ -464,6 +469,7 @@ namespace FlyDisk.Engine
                 if (rc != ERROR_SUCCESS)
                 {
                     LogService.DebugFile($"iSCSI initiator: session list fetch rc=0x{rc:X8} (struct={structSize}B)");
+                    if (strict) throw new IOException($"Cannot query iSCSI sessions: 0x{rc:X8}");
                     return result;
                 }
 
@@ -471,6 +477,7 @@ namespace FlyDisk.Engine
                 {
                     ISCSI_SESSION_INFOW info =
                         Marshal.PtrToStructure<ISCSI_SESSION_INFOW>(IntPtr.Add(buffer, (int)i * structSize));
+                    if (connectedOnly && info.ConnectionCount == 0) continue;
 
                     // 两个紧邻的名字字段都看（顺序在资料里有分歧，见 ISCSI_SESSION_INFOW 注释）
                     string nodeName = ReadUni(info.TargetNodeName);
